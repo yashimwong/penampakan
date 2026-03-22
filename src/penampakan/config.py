@@ -13,7 +13,6 @@ else:
 
 from .models import Capability
 
-
 _BACKEND_NAME = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 
 
@@ -81,10 +80,12 @@ class CacheSettings(_SettingsModel):
 class AgentSettings(_SettingsModel):
     """Configuration for policy orchestration and initial perception."""
 
-    initial_capabilities: tuple[Capability, ...] = (
-        Capability.METADATA,
-        Capability.CAPTION,
-        Capability.OCR,
+    initial_capabilities: tuple[Capability, ...] = Field(
+        default_factory=lambda: (
+            Capability.METADATA,
+            Capability.CAPTION,
+            Capability.OCR,
+        )
     )
     fallback_backends: bool = True
     strict_evidence: bool = True

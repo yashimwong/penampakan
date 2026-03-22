@@ -309,7 +309,7 @@ class Provenance(_FrozenModel):
     model_id: _CleanText | None = None
     model_revision: _CleanText | None = None
     request_hash: _Sha256
-    parent_observation_ids: tuple[_ObservationId, ...] = ()
+    parent_observation_ids: tuple[_ObservationId, ...] = Field(default_factory=tuple)
     cache_hit: bool = False
     duration_ms: Annotated[int, Field(ge=0)]
 
@@ -349,7 +349,9 @@ class OCRRequest(_FrozenModel):
 
     capability: Literal[Capability.OCR] = Capability.OCR
     region: Box | None = None
-    languages: Annotated[tuple[_LanguageTag, ...], Field(max_length=8)] = ()
+    languages: Annotated[tuple[_LanguageTag, ...], Field(max_length=8)] = Field(
+        default_factory=tuple
+    )
     mode: Literal["auto", "sparse", "dense", "single_line"] = "auto"
     min_confidence: _Confidence | None = None
 
@@ -370,7 +372,7 @@ class DetectionRequest(_FrozenModel):
 
     capability: Literal[Capability.DETECT] = Capability.DETECT
     region: Box | None = None
-    labels: Annotated[tuple[_Label, ...], Field(max_length=64)] = ()
+    labels: Annotated[tuple[_Label, ...], Field(max_length=64)] = Field(default_factory=tuple)
     min_confidence: _Confidence = 0.25
     max_results: Annotated[int, Field(gt=0)] = 100
 
@@ -385,8 +387,8 @@ class SegmentationRequest(_FrozenModel):
 
     capability: Literal[Capability.SEGMENT] = Capability.SEGMENT
     region: Box | None = None
-    labels: Annotated[tuple[_Label, ...], Field(max_length=64)] = ()
-    points: tuple[Point, ...] = ()
+    labels: Annotated[tuple[_Label, ...], Field(max_length=64)] = Field(default_factory=tuple)
+    points: tuple[Point, ...] = Field(default_factory=tuple)
     min_confidence: _Confidence = 0.25
     max_results: Annotated[int, Field(gt=0)] = 32
 
@@ -474,7 +476,7 @@ class DetectionPayload(_FrozenModel):
 
     type: Literal["detection"] = "detection"
     label: _Label
-    attributes: tuple[_Label, ...] = ()
+    attributes: tuple[_Label, ...] = Field(default_factory=tuple)
 
 
 class SegmentationPayload(_FrozenModel):
@@ -482,7 +484,7 @@ class SegmentationPayload(_FrozenModel):
 
     type: Literal["segmentation"] = "segmentation"
     label: _Label
-    polygon: tuple[Point, ...] = ()
+    polygon: tuple[Point, ...] = Field(default_factory=tuple)
 
     @field_validator("polygon")
     @classmethod
@@ -544,9 +546,9 @@ class Observation(_FrozenModel):
     region: Box | None = None
     confidence: _Confidence | None = None
     provenance: Provenance
-    supersedes: tuple[_ObservationId, ...] = ()
-    contradicts: tuple[_ObservationId, ...] = ()
-    warnings: tuple[WarningInfo, ...] = ()
+    supersedes: tuple[_ObservationId, ...] = Field(default_factory=tuple)
+    contradicts: tuple[_ObservationId, ...] = Field(default_factory=tuple)
+    warnings: tuple[WarningInfo, ...] = Field(default_factory=tuple)
 
     @model_validator(mode="after")
     def _validate_region_semantics(self) -> Observation:
@@ -564,7 +566,7 @@ class ObservationDraft(_FrozenModel):
     payload: ObservationPayload
     region: Box | None = None
     confidence: _Confidence | None = None
-    warnings: tuple[WarningInfo, ...] = ()
+    warnings: tuple[WarningInfo, ...] = Field(default_factory=tuple)
 
     @model_validator(mode="after")
     def _validate_region_semantics(self) -> ObservationDraft:
@@ -580,7 +582,7 @@ class VisionResult(_FrozenModel):
     """A complete backend response awaiting core normalization."""
 
     observations: tuple[ObservationDraft, ...]
-    warnings: tuple[WarningInfo, ...] = ()
+    warnings: tuple[WarningInfo, ...] = Field(default_factory=tuple)
 
 
 class TraceSummary(_FrozenModel):
@@ -674,7 +676,7 @@ class InspectionOperation(_FrozenModel):
 class InspectionPlan(_FrozenModel):
     """An ordered set of perception operations and overview behavior."""
 
-    operations: tuple[InspectionOperation, ...] = ()
+    operations: tuple[InspectionOperation, ...] = Field(default_factory=tuple)
     include_available_overview: bool = True
     fail_fast: bool = False
 
@@ -798,8 +800,8 @@ class AnswerAction(_FrozenModel):
         StringConstraints(strip_whitespace=True, min_length=1, max_length=8_000),
         AfterValidator(_reject_nul),
     ]
-    evidence: tuple[EvidenceRef, ...] = ()
-    uncertainties: tuple[_CleanText, ...] = ()
+    evidence: tuple[EvidenceRef, ...] = Field(default_factory=tuple)
+    uncertainties: tuple[_CleanText, ...] = Field(default_factory=tuple)
 
 
 PolicyAction: TypeAlias = Annotated[
@@ -893,7 +895,7 @@ class PolicyInput(_FrozenModel):
     prior_actions: tuple[PolicyAction, ...]
     remaining: RemainingBudget
     answer_only: bool = False
-    validation_feedback: tuple[WarningInfo, ...] = ()
+    validation_feedback: tuple[WarningInfo, ...] = Field(default_factory=tuple)
     invalid_model_output: _RawText | None = Field(default=None, repr=False)
 
 
