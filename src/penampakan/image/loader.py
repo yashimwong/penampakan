@@ -55,6 +55,11 @@ class LoadedImage:
 
         return cast(Literal["RGB", "RGBA"], self.image.mode)
 
+    def close(self) -> None:
+        """Release the owned normalized image idempotently."""
+
+        self.image.close()
+
 
 def load_image(source: ImageSource, limits: ImageLimits | None = None) -> LoadedImage:
     """Load an image source into an owned canonical RGB or RGBA representation."""
