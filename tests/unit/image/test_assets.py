@@ -8,7 +8,9 @@ from penampakan.errors import (
     SessionClosedError,
 )
 from penampakan.image.assets import AssetStore, PendingAsset
+from penampakan.image.loader import load_image
 from penampakan.models import TransformDescriptor
+from tests.fixtures.images import encode_image
 
 
 def transform(name: str = "crop") -> TransformDescriptor:
@@ -93,4 +95,17 @@ def test_store_close_is_idempotent_and_rejects_access() -> None:
 
     with pytest.raises(SessionClosedError):
         store.snapshots()
+    source.close()
+
+
+def test_store_consumes_loaded_image_ownership() -> None:
+    source = Image.new("RGB", (2, 2), "red")
+    loaded = load_image(encode_image(source))
+
+    store = AssetStore.from_loaded(loaded)
+
+    with pytest.raises(ValueError):
+        loaded.image.getbbox()
+    assert store.root.original_format == "PNG"
+    store.close()
     source.close()
