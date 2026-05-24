@@ -1,3 +1,6 @@
 """Optional and built-in vision backend adapters."""
 
-__all__: tuple[str, ...] = ()
+from penampakan.backends.callable import CallableVisionBackend
+from penampakan.backends.pillow import PillowBackend
+
+__all__ = ("CallableVisionBackend", "PillowBackend")
