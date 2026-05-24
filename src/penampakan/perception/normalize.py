@@ -142,9 +142,7 @@ def _prepare_draft(value: object) -> tuple[object, _TextChange]:
         mapping["region"] = _prepare_region(mapping["region"])
     warnings = mapping.get("warnings")
     if isinstance(warnings, tuple):
-        mapping["warnings"] = tuple(
-            _model_mapping(warning) or warning for warning in warnings
-        )
+        mapping["warnings"] = tuple(_model_mapping(warning) or warning for warning in warnings)
     return mapping, change
 
 
@@ -164,9 +162,7 @@ def _prepare_result(value: VisionResult | Mapping[str, object]) -> _PreparedResu
         mapping["observations"] = tuple(prepared_observations)
     warnings = mapping.get("warnings")
     if isinstance(warnings, tuple):
-        mapping["warnings"] = tuple(
-            _model_mapping(warning) or warning for warning in warnings
-        )
+        mapping["warnings"] = tuple(_model_mapping(warning) or warning for warning in warnings)
     return _PreparedResult(data=mapping, text_changes=changes)
 
 
@@ -317,9 +313,11 @@ def _normalized_draft(
     if change.removed_controls:
         warnings = _append_warning(warnings, _control_warning(change.removed_controls))
     region = _scope_region(draft.region, request, draft.payload)
-    if isinstance(draft.payload, (TextPayload, DetectionPayload, SegmentationPayload)):
-        if region is None:
-            warnings = _append_warning(warnings, _location_warning())
+    if (
+        isinstance(draft.payload, (TextPayload, DetectionPayload, SegmentationPayload))
+        and region is None
+    ):
+        warnings = _append_warning(warnings, _location_warning())
     return ObservationDraft(
         payload=draft.payload,
         region=region,
