@@ -134,9 +134,7 @@ def _embedded_arguments_schema(
     names: dict[str, str] = {}
     for name in local_definitions:
         names[name] = f"{tool.name}__{name}"
-        references[f"#/$defs/{_pointer_token(name)}"] = (
-            f"#/$defs/{_pointer_token(names[name])}"
-        )
+        references[f"#/$defs/{_pointer_token(name)}"] = f"#/$defs/{_pointer_token(names[name])}"
     for name, definition in local_definitions.items():
         definitions[names[name]] = _rewrite_references(definition, references)
     rewritten = _rewrite_references(schema, references)
@@ -238,8 +236,7 @@ def _tool_catalog(tools: tuple[ToolSpec, ...]) -> list[dict[str, JsonValue]]:
 
 def _prior_actions(input: PolicyInput) -> list[dict[str, JsonValue]]:
     return [
-        cast(dict[str, JsonValue], action.model_dump(mode="json"))
-        for action in input.prior_actions
+        cast(dict[str, JsonValue], action.model_dump(mode="json")) for action in input.prior_actions
     ]
 
 
