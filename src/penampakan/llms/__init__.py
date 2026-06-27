@@ -1,3 +1,5 @@
 """Text language model adapters."""
 
-__all__: tuple[str, ...] = ()
+from penampakan.llms.callable import CallableTextLLM
+
+__all__ = ["CallableTextLLM"]
