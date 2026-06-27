@@ -104,6 +104,14 @@ class ContextCompiler:
         normalized_question = _validate_question(question)
         _validate_unique_observations(observations)
         observation_by_id = {observation.id: observation for observation in observations}
+        conflict_and_warning_ids = tuple(
+            dict.fromkeys(
+                reference
+                for observation in observations
+                if isinstance(observation.payload, WarningPayload) or observation.contradicts
+                for reference in (observation.id, *observation.contradicts)
+            )
+        )
         eligible_assets = _eligible_assets(
             observations,
             root_asset_id,
@@ -111,7 +119,8 @@ class ContextCompiler:
             most_recent_asset_lineage,
             previous_action_observation_ids
             + previous_answer_observation_ids
-            + pinned_observation_ids,
+            + pinned_observation_ids
+            + conflict_and_warning_ids,
             observation_by_id,
         )
         eligible = tuple(
