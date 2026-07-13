@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -98,6 +98,7 @@ class BackendRouter:
         fallback_backends: bool = True,
         backend_timeout_s: float = 60.0,
         trusted_reserved_names: Collection[str] = (),
+        authoritative_backends: Mapping[Capability, str] | None = None,
     ) -> None:
         self._fallback_backends = fallback_backends
         if not isinstance(fallback_backends, bool):
@@ -106,6 +107,9 @@ class BackendRouter:
         self._trusted_reserved_names = frozenset(trusted_reserved_names)
         self._entries = self._build_entries(backends)
         self._by_name = {entry.descriptor.name: entry for entry in self._entries}
+        self._authoritative_backends = self._validate_authoritative_backends(
+            authoritative_backends or {}
+        )
         self._preferences = self._validate_preferences(preferences or {})
         self._state_lock = asyncio.Lock()
         self._idle = asyncio.Event()
@@ -159,6 +163,14 @@ class BackendRouter:
         backend_name: str | None,
     ) -> tuple[BackendDescriptor, ...]:
         capability = request.capability
+        authoritative_name = self._authoritative_backends.get(capability)
+        if authoritative_name is not None:
+            if backend_name is not None and backend_name != authoritative_name:
+                raise CapabilityUnavailableError(code="backend_override_incompatible")
+            authoritative = self._by_name[authoritative_name]
+            if not self._supports(authoritative, request):
+                raise CapabilityUnavailableError(code="capability_option_unavailable")
+            return (authoritative.descriptor,)
         ordered: list[_BackendEntry] = []
         selected: set[str] = set()
         if backend_name is not None:
@@ -191,6 +203,7 @@ class BackendRouter:
         *,
         backend_name: str | None = None,
         timeout_s: float | None = None,
+        before_attempt: Callable[[BackendDescriptor], Awaitable[None]] | None = None,
     ) -> RouteResult:
         """Analyze through deterministic fallback while preserving safe attempt data."""
         await self._begin_call()
@@ -201,6 +214,8 @@ class BackendRouter:
             warnings: list[WarningInfo] = []
             for descriptor in descriptors:
                 entry = self._by_name[descriptor.name]
+                if before_attempt is not None:
+                    await before_attempt(descriptor)
                 started = time.monotonic()
                 try:
                     result = await asyncio.wait_for(
@@ -349,6 +364,20 @@ class BackendRouter:
                     raise ConfigurationError(code="incompatible_backend_preference")
             validated[capability] = ordered
         return validated
+
+    def _validate_authoritative_backends(
+        self,
+        configured: Mapping[Capability, str],
+    ) -> dict[Capability, str]:
+        result: dict[Capability, str] = {}
+        for capability, name in configured.items():
+            entry = self._by_name.get(name)
+            if not isinstance(capability, Capability) or entry is None:
+                raise ConfigurationError(code="invalid_authoritative_backend")
+            if not self._declares(entry.descriptor, capability):
+                raise ConfigurationError(code="invalid_authoritative_backend")
+            result[capability] = name
+        return result
 
     @staticmethod
     def _stable_descriptor(backend: VisionBackend) -> BackendDescriptor:
