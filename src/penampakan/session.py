@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -11,15 +12,22 @@ from PIL.Image import Image as PillowImage
 
 from penampakan.config import Settings, validate_timeout_s
 from penampakan.errors import (
+    BudgetExceededError,
     CapabilityUnavailableError,
+    EvidenceValidationError,
     InspectionFailedError,
+    InvalidModelActionError,
+    LLMCallLimitExceededError,
+    LLMError,
     LLMNotConfiguredError,
     OperationTimeoutError,
     PenampakanError,
     SessionClosedError,
+    ToolLimitExceededError,
 )
-from penampakan.image.assets import AssetStore
+from penampakan.image.assets import AssetCommit, AssetStore
 from penampakan.models import (
+    AnswerAction,
     BackendDescriptor,
     Capability,
     CaptionRequest,
@@ -30,11 +38,17 @@ from penampakan.models import (
     InspectionResult,
     MetadataRequest,
     Observation,
+    ObservationDraft,
     OCRRequest,
+    PolicyAction,
+    PolicyInput,
+    ToolAction,
+    TransformPayload,
     VisionAnswer,
     VisionRequest,
     VisionResult,
     WarningInfo,
+    WarningPayload,
 )
 from penampakan.perception.cache import (
     SingleFlightCoordinator,
@@ -46,7 +60,10 @@ from penampakan.perception.registry import ToolRegistry, ToolResult
 from penampakan.perception.router import BackendRouter, RouteResult
 from penampakan.perception.store import ObservationStore, ProvenanceSpec
 from penampakan.protocols import ActionPolicy, Cache, TraceSink
+from penampakan.reasoning.actions import ActionParseError
+from penampakan.reasoning.answer import materialize_answer, validate_evidence
 from penampakan.reasoning.budget import RunBudget
+from penampakan.reasoning.context import CompiledContext, ContextCompiler
 from penampakan.tracing import TraceBuilder
 
 _PREPROCESSING_VERSION = "normalize-v1"
@@ -112,6 +129,7 @@ class AsyncVisionSession:
         self._active_trace: TraceBuilder | None = None
         self._active_tool_name: str | None = None
         self._last_perception: _PerceptionOutcome | None = None
+        self._previous_answer_observation_ids: tuple[str, ...] = ()
 
     @property
     def root_asset(self) -> ImageAsset:
@@ -169,7 +187,14 @@ class AsyncVisionSession:
         timeout_s: float | None = None,
     ) -> VisionAnswer:
         """Answer a question through the configured bounded action policy."""
-        raise LLMNotConfiguredError()
+        if self._policy is None:
+            raise LLMNotConfiguredError()
+        normalized_question = self._validate_question(question)
+        timeout = validate_timeout_s(timeout_s)
+        self._require_open()
+        async with self._operation_lock:
+            self._require_open()
+            return await self._run_ask(normalized_question, timeout)
 
     def image(self, asset_id: str) -> PillowImage:
         """Return a caller-owned normalized image copy for a built-in tool."""
@@ -223,6 +248,729 @@ class AsyncVisionSession:
     ) -> None:
         """Close this reusable session context."""
         await self.aclose()
+
+    async def _run_ask(
+        self,
+        question: str,
+        timeout_s: float | None,
+    ) -> VisionAnswer:
+        budget = RunBudget(self._settings.run, timeout_s=timeout_s)
+        trace = TraceBuilder(
+            content_policy=self._settings.trace_content,
+            sinks=self._trace_sinks,
+        )
+        await trace.start(
+            {
+                "operation": "ask",
+                "asset_id": self._assets.root_id,
+                "question": question,
+            }
+        )
+        await trace.emit("image_loaded", {"asset_id": self._assets.root_id})
+        try:
+            return await asyncio.wait_for(
+                self._ask_body(question, budget, trace),
+                timeout=budget.remaining_time_s(),
+            )
+        except asyncio.CancelledError:
+            await trace.cancel()
+            raise
+        except asyncio.TimeoutError as error:
+            timeout_error = OperationTimeoutError(trace_id=trace.trace_id, cause=error)
+            await trace.fail(timeout_error)
+            raise timeout_error from error
+        except Exception as error:
+            if isinstance(error, PenampakanError):
+                error.trace_id = trace.trace_id
+            if not trace.finalized:
+                await trace.fail(error)
+            raise
+
+    async def _ask_body(
+        self,
+        question: str,
+        budget: RunBudget,
+        trace: TraceBuilder,
+    ) -> VisionAnswer:
+        warnings = list(self._load_warnings)
+        initial_ids, initial_warnings = await self._ensure_initial_observations(
+            question,
+            budget,
+            trace,
+        )
+        warnings.extend(initial_warnings)
+        actions: list[PolicyAction] = []
+        action_counts: dict[str, int] = {}
+        previous_action_ids = initial_ids
+        recent_lineage: tuple[str, ...] = (self._assets.root_id,)
+        while budget.can_start_interactive_step():
+            context = self._compile_context(
+                question,
+                previous_action_ids=previous_action_ids,
+                recent_lineage=recent_lineage,
+            )
+            action = await self._policy_action(
+                question,
+                context,
+                tuple(actions),
+                budget,
+                trace,
+                answer_only=False,
+            )
+            await budget.reserve_step()
+            actions.append(action)
+            if isinstance(action, AnswerAction):
+                return await self._complete_answer(
+                    action,
+                    question,
+                    context,
+                    tuple(actions),
+                    budget,
+                    trace,
+                    warnings,
+                    final_call=False,
+                )
+            canonical_call = self._canonical_tool_call(action)
+            count = action_counts.get(canonical_call, 0)
+            if count >= self._settings.agent.max_identical_actions:
+                warning_observation = await self._commit_reasoning_warning(
+                    "repeated_action_cycle",
+                    "A repeated identical tool action was blocked by the cycle limit.",
+                    trace,
+                    parent_observation_ids=previous_action_ids,
+                )
+                warnings.append(
+                    WarningInfo(
+                        code="repeated_action_cycle",
+                        message="A repeated identical tool action was blocked.",
+                    )
+                )
+                previous_action_ids = (warning_observation.id,)
+                continue
+            action_counts[canonical_call] = count + 1
+            try:
+                tool_observations, tool_warnings, lineage = await self._execute_action(
+                    action,
+                    context,
+                    budget,
+                    trace,
+                    parent_observation_ids=previous_action_ids,
+                )
+            except BudgetExceededError as error:
+                warnings.append(
+                    WarningInfo(
+                        code="budget_stop",
+                        message="A tool action was stopped by a configured run budget.",
+                        details={"reason": error.code},
+                    )
+                )
+                break
+            previous_action_ids = tuple(item.id for item in tool_observations)
+            warnings.extend(tool_warnings)
+            if lineage:
+                recent_lineage = lineage
+        stop_reason = budget.soft_stop_reason() or "step_limit"
+        await trace.emit("budget_stop", {"reason": stop_reason})
+        context = self._compile_context(
+            question,
+            previous_action_ids=previous_action_ids,
+            recent_lineage=recent_lineage,
+        )
+        action = await self._policy_action(
+            question,
+            context,
+            tuple(actions),
+            budget,
+            trace,
+            answer_only=True,
+        )
+        await budget.reserve_step(answer_only=True)
+        if not isinstance(action, AnswerAction):
+            raise InvalidModelActionError(code="final_action_must_answer")
+        actions.append(action)
+        return await self._complete_answer(
+            action,
+            question,
+            context,
+            tuple(actions),
+            budget,
+            trace,
+            warnings,
+            final_call=True,
+        )
+
+    async def _ensure_initial_observations(
+        self,
+        question: str,
+        budget: RunBudget,
+        trace: TraceBuilder,
+    ) -> tuple[tuple[str, ...], tuple[WarningInfo, ...]]:
+        await trace.emit("initial_plan_started", {"asset_id": self._assets.root_id})
+        new_observations: list[Observation] = []
+        warnings: list[WarningInfo] = []
+        existing = self._observations.snapshots()
+        existing_capabilities = {
+            observation.provenance.capability
+            for observation in existing
+            if observation.asset_id == self._assets.root_id
+        }
+        for capability in self._settings.agent.initial_capabilities:
+            if capability in existing_capabilities:
+                continue
+            request = self._initial_request(capability, question)
+            if request is None or not self._router.supports(request):
+                warnings.append(
+                    WarningInfo(
+                        code="capability_unavailable",
+                        message="An initial perception capability is unavailable.",
+                        details={"capability": capability.value},
+                    )
+                )
+                continue
+            try:
+                await budget.reserve_tool_call()
+            except ToolLimitExceededError:
+                warnings.append(
+                    WarningInfo(
+                        code="initial_plan_truncated",
+                        message="The initial perception plan was truncated by the tool budget.",
+                    )
+                )
+                break
+            tool_name = self._tool_name(capability)
+            await trace.emit(
+                "tool_call_started",
+                {
+                    "tool_name": tool_name,
+                    "asset_id": self._assets.root_id,
+                    "request_hash": self._request_hash(request),
+                },
+            )
+            outcome = await self._perceive(
+                self._assets.root_id,
+                request,
+                tool_name=tool_name,
+                budget=budget,
+                trace=trace,
+            )
+            committed = self._observations.commit_result(
+                self._assets.root_id,
+                outcome.result,
+                outcome.provenance,
+            )
+            new_observations.extend(committed)
+            warning_observations = self._commit_warning_infos(
+                self._assets.root_id,
+                outcome.warnings,
+                parent_observation_ids=tuple(item.id for item in committed),
+            )
+            new_observations.extend(warning_observations)
+            warnings.extend(outcome.warnings)
+            await self._trace_committed(
+                trace,
+                self._assets.root_id,
+                (*committed, *warning_observations),
+            )
+        return tuple(item.id for item in new_observations), tuple(warnings)
+
+    def _initial_request(
+        self,
+        capability: Capability,
+        question: str,
+    ) -> VisionRequest | None:
+        if capability is Capability.METADATA:
+            return MetadataRequest()
+        if capability is Capability.COLORS:
+            return ColorsRequest()
+        if capability is Capability.CAPTION:
+            focused = CaptionRequest(focus=question)
+            return focused if self._router.supports(focused) else CaptionRequest()
+        if capability is Capability.OCR:
+            return OCRRequest()
+        return None
+
+    def _compile_context(
+        self,
+        question: str,
+        *,
+        previous_action_ids: tuple[str, ...],
+        recent_lineage: tuple[str, ...],
+    ) -> CompiledContext:
+        compiler = ContextCompiler(self._settings.run.max_context_chars)
+        compiled = compiler.compile(
+            question,
+            self._observations.snapshots(),
+            root_asset_id=self._assets.root_id,
+            relevant_asset_ids=tuple(asset.id for asset in self._assets.snapshots()),
+            most_recent_asset_lineage=recent_lineage,
+            previous_action_observation_ids=previous_action_ids,
+            previous_answer_observation_ids=self._previous_answer_observation_ids,
+        )
+        return compiled
+
+    async def _policy_action(
+        self,
+        question: str,
+        context: CompiledContext,
+        prior_actions: tuple[PolicyAction, ...],
+        budget: RunBudget,
+        trace: TraceBuilder,
+        *,
+        answer_only: bool,
+        validation_feedback: tuple[WarningInfo, ...] = (),
+        invalid_model_output: str | None = None,
+        repair: bool = False,
+        budget_final: bool | None = None,
+    ) -> PolicyAction:
+        if self._policy is None:
+            raise LLMNotConfiguredError()
+        final_reservation = answer_only if budget_final is None else budget_final
+        await budget.reserve_llm_call(final=final_reservation, repair=repair)
+        await trace.emit(
+            "policy_call_started",
+            {
+                "answer_only": answer_only,
+                "repair": repair,
+                "included_observation_ids": list(context.visible_observation_ids),
+                "omitted_observation_ids": list(context.omitted_observation_ids),
+            },
+        )
+        policy_input = PolicyInput(
+            question=question,
+            context=context.text,
+            tools=self._tools.specs,
+            prior_actions=prior_actions,
+            remaining=budget.remaining(current_depth=self._maximum_depth()),
+            answer_only=answer_only,
+            validation_feedback=validation_feedback,
+            invalid_model_output=invalid_model_output,
+        )
+        try:
+            action = await asyncio.wait_for(
+                self._policy.next_action(policy_input),
+                timeout=budget.component_timeout(self._settings.run.llm_timeout_s),
+            )
+        except asyncio.TimeoutError as error:
+            raise LLMError(code="llm_timeout", cause=error) from error
+        except ActionParseError as error:
+            await trace.emit(
+                "invalid_action",
+                {"code": "invalid_model_action", "repair": repair},
+            )
+            if repair:
+                raise InvalidModelActionError(cause=error) from error
+            try:
+                return await self._policy_action(
+                    question,
+                    context,
+                    prior_actions,
+                    budget,
+                    trace,
+                    answer_only=answer_only,
+                    validation_feedback=error.feedback,
+                    invalid_model_output=error.invalid_model_output,
+                    repair=True,
+                    budget_final=final_reservation,
+                )
+            except LLMCallLimitExceededError as limit_error:
+                raise InvalidModelActionError(cause=limit_error) from limit_error
+        if not isinstance(action, (ToolAction, AnswerAction)):
+            raise InvalidModelActionError(code="invalid_policy_action")
+        await trace.emit(
+            "policy_call_finished",
+            {"action_type": action.type, "repair": repair},
+        )
+        return action
+
+    async def _complete_answer(
+        self,
+        action: AnswerAction,
+        question: str,
+        context: CompiledContext,
+        prior_actions: tuple[PolicyAction, ...],
+        budget: RunBudget,
+        trace: TraceBuilder,
+        warnings: list[WarningInfo],
+        *,
+        final_call: bool,
+    ) -> VisionAnswer:
+        try:
+            validate_evidence(
+                action,
+                self._observations.snapshots(),
+                visible_observation_ids=context.visible_observation_ids,
+                root_asset_id=self._assets.root_id,
+                asset_root_ids=self._asset_root_ids(),
+            )
+        except EvidenceValidationError as error:
+            feedback = (
+                WarningInfo(
+                    code="evidence_validation",
+                    message="The answer contains invalid evidence references.",
+                ),
+            )
+            try:
+                repaired = await self._policy_action(
+                    question,
+                    context,
+                    prior_actions,
+                    budget,
+                    trace,
+                    answer_only=True,
+                    validation_feedback=feedback,
+                    invalid_model_output=action.model_dump_json(exclude_none=True),
+                    repair=True,
+                    budget_final=final_call,
+                )
+            except (InvalidModelActionError, LLMCallLimitExceededError):
+                raise EvidenceValidationError(cause=error) from error
+            if not isinstance(repaired, AnswerAction):
+                raise EvidenceValidationError(cause=error) from error
+            try:
+                validate_evidence(
+                    repaired,
+                    self._observations.snapshots(),
+                    visible_observation_ids=context.visible_observation_ids,
+                    root_asset_id=self._assets.root_id,
+                    asset_root_ids=self._asset_root_ids(),
+                )
+            except EvidenceValidationError as second_error:
+                raise EvidenceValidationError(cause=second_error) from second_error
+            action = repaired
+        evidence_ids = tuple(item.observation_id for item in action.evidence)
+        self._previous_answer_observation_ids = tuple(dict.fromkeys(evidence_ids))
+        await trace.emit(
+            "answer_validated",
+            {"status": action.status, "evidence_ids": list(evidence_ids)},
+        )
+        if action.status == "answered":
+            completed_trace = await trace.finish("completed")
+        else:
+            completed_trace = await trace.finish("insufficient_evidence")
+        return materialize_answer(
+            action,
+            self._observations.snapshots(),
+            visible_observation_ids=context.visible_observation_ids,
+            root_asset_id=self._assets.root_id,
+            asset_root_ids=self._asset_root_ids(),
+            warnings=(*warnings, *trace.warnings),
+            trace=completed_trace,
+        )
+
+    async def _execute_action(
+        self,
+        action: ToolAction,
+        context: CompiledContext,
+        budget: RunBudget,
+        trace: TraceBuilder,
+        *,
+        parent_observation_ids: tuple[str, ...],
+    ) -> tuple[tuple[Observation, ...], tuple[WarningInfo, ...], tuple[str, ...]]:
+        try:
+            validated = self._tools.validate_arguments(action.tool, action.arguments)
+        except Exception:
+            warning = await self._commit_reasoning_warning(
+                "invalid_tool_arguments",
+                "A tool action contained invalid or undeclared arguments.",
+                trace,
+                parent_observation_ids=parent_observation_ids,
+            )
+            return (
+                (warning,),
+                (
+                    WarningInfo(
+                        code="invalid_tool_arguments",
+                        message="A tool action contained invalid arguments.",
+                    ),
+                ),
+                (),
+            )
+        asset_id = getattr(validated, "asset_id", None)
+        if not isinstance(asset_id, str) or asset_id not in context.visible_asset_ids:
+            warning = await self._commit_reasoning_warning(
+                "tool_asset_not_visible",
+                "A tool action referenced an asset outside the latest policy context.",
+                trace,
+                parent_observation_ids=parent_observation_ids,
+            )
+            return (
+                (warning,),
+                (
+                    WarningInfo(
+                        code="tool_asset_not_visible",
+                        message="A tool action referenced an unavailable asset.",
+                    ),
+                ),
+                (),
+            )
+        await budget.reserve_tool_call()
+        reserved_assets = self._transform_asset_count(action.tool, validated)
+        if reserved_assets:
+            parent = self._assets.snapshot(asset_id)
+            await budget.reserve_derived_assets(
+                reserved_assets,
+                parent_depth=parent.derivation_depth,
+            )
+        await trace.emit(
+            "tool_call_started",
+            {
+                "tool_name": action.tool,
+                "asset_id": asset_id,
+                "action_hash": self._canonical_tool_call(action),
+            },
+        )
+        self._active_budget = budget
+        self._active_trace = trace
+        self._active_tool_name = action.tool
+        self._last_perception = None
+        try:
+            result = await self._tools.execute(self, action.tool, action.arguments)
+        except asyncio.CancelledError:
+            if reserved_assets:
+                await budget.refund_reused_assets(reserved_assets)
+            raise
+        except Exception:
+            if reserved_assets:
+                await budget.refund_reused_assets(reserved_assets)
+            warning_observation = await self._commit_reasoning_warning(
+                "tool_execution_failed",
+                "A visual tool could not complete its requested operation.",
+                trace,
+                parent_observation_ids=parent_observation_ids,
+            )
+            warning_info = WarningInfo(
+                code="tool_execution_failed",
+                message="A requested visual tool failed safely.",
+                details={"tool_name": action.tool},
+            )
+            return (warning_observation,), (warning_info,), ()
+        finally:
+            self._active_budget = None
+            self._active_trace = None
+            self._active_tool_name = None
+        if result.assets:
+            commits = self._assets.commit(asset_id, result.assets)
+            reused = sum(commit.reused for commit in commits)
+            if reused:
+                await budget.refund_reused_assets(reused)
+            observations = self._commit_transform_observations(
+                action,
+                commits,
+                parent_observation_ids,
+            )
+            for commit in commits:
+                if commit.reused:
+                    continue
+                await trace.emit(
+                    "asset_created",
+                    {
+                        "asset_id": commit.asset.id,
+                        "parent_asset_id": commit.parent_id,
+                        "reused": commit.reused,
+                    },
+                )
+            warning_observations = self._commit_warning_infos(
+                asset_id,
+                result.warnings,
+                parent_observation_ids=tuple(item.id for item in observations),
+            )
+            observations = (*observations, *warning_observations)
+            await self._trace_committed_many(trace, observations)
+            lineage = self._lineage_for_asset(commits[-1].asset.id) if commits else ()
+            return observations, result.warnings, lineage
+        perception = self._last_perception
+        if perception is None:
+            return (), result.warnings, self._lineage_for_asset(asset_id)
+        observations = self._observations.commit_result(
+            perception.asset_id,
+            perception.result,
+            ProvenanceSpec(
+                tool=perception.provenance.tool,
+                capability=perception.provenance.capability,
+                backend_name=perception.provenance.backend_name,
+                backend_version=perception.provenance.backend_version,
+                model_id=perception.provenance.model_id,
+                model_revision=perception.provenance.model_revision,
+                request_hash=perception.provenance.request_hash,
+                cache_hit=perception.provenance.cache_hit,
+                duration_ms=perception.provenance.duration_ms,
+                parent_observation_ids=parent_observation_ids,
+            ),
+        )
+        warning_observations = self._commit_warning_infos(
+            perception.asset_id,
+            result.warnings,
+            parent_observation_ids=tuple(item.id for item in observations),
+        )
+        observations = (*observations, *warning_observations)
+        await self._trace_committed(trace, perception.asset_id, observations)
+        return observations, result.warnings, self._lineage_for_asset(asset_id)
+
+    def _commit_transform_observations(
+        self,
+        action: ToolAction,
+        commits: tuple[AssetCommit, ...],
+        parent_observation_ids: tuple[str, ...],
+    ) -> tuple[Observation, ...]:
+        observations: list[Observation] = []
+        provenance = ProvenanceSpec(
+            tool=action.tool,
+            capability=None,
+            backend_name="penampakan.transforms",
+            backend_version="1",
+            request_hash=self._canonical_tool_call(action),
+            duration_ms=0,
+            parent_observation_ids=parent_observation_ids,
+        )
+        for commit in commits:
+            draft = ObservationDraft(
+                payload=TransformPayload(
+                    derived_asset_id=commit.asset.id,
+                    parent_asset_id=commit.parent_id,
+                    transform=commit.transform,
+                )
+            )
+            observations.extend(
+                self._observations.commit_drafts(
+                    commit.asset.id,
+                    (draft,),
+                    provenance,
+                )
+            )
+        return tuple(observations)
+
+    async def _commit_reasoning_warning(
+        self,
+        code: str,
+        message: str,
+        trace: TraceBuilder,
+        *,
+        parent_observation_ids: tuple[str, ...],
+    ) -> Observation:
+        safe_code = code if code.replace("_", "a").isalnum() else "reasoning_warning"
+        draft = ObservationDraft(payload=WarningPayload(code=safe_code, message=message))
+        committed = self._observations.commit_drafts(
+            self._assets.root_id,
+            (draft,),
+            ProvenanceSpec(
+                tool="reasoning_warning",
+                capability=None,
+                backend_name="penampakan.core",
+                backend_version="1",
+                request_hash=hashlib.sha256(code.encode("utf-8")).hexdigest(),
+                duration_ms=0,
+                parent_observation_ids=parent_observation_ids,
+            ),
+        )
+        await self._trace_committed(trace, self._assets.root_id, committed)
+        return committed[0]
+
+    def _commit_warning_infos(
+        self,
+        asset_id: str,
+        warnings: tuple[WarningInfo, ...],
+        *,
+        parent_observation_ids: tuple[str, ...],
+    ) -> tuple[Observation, ...]:
+        if not warnings:
+            return ()
+        drafts = tuple(
+            ObservationDraft(payload=WarningPayload(code=warning.code, message=warning.message))
+            for warning in warnings
+        )
+        request_material = "\n".join(warning.code for warning in warnings).encode("utf-8")
+        return self._observations.commit_drafts(
+            asset_id,
+            drafts,
+            ProvenanceSpec(
+                tool="perception_warning",
+                capability=None,
+                backend_name="penampakan.core",
+                backend_version="1",
+                request_hash=hashlib.sha256(request_material).hexdigest(),
+                duration_ms=0,
+                parent_observation_ids=parent_observation_ids,
+            ),
+        )
+
+    @staticmethod
+    def _transform_asset_count(tool_name: str, validated: object) -> int:
+        if tool_name == "tile":
+            rows = getattr(validated, "rows", 0)
+            columns = getattr(validated, "columns", 0)
+            return rows * columns if isinstance(rows, int) and isinstance(columns, int) else 0
+        if tool_name in {
+            "crop",
+            "rotate",
+            "enhance_contrast",
+            "to_grayscale",
+            "add_coordinate_grid",
+        }:
+            return 1
+        return 0
+
+    @staticmethod
+    def _canonical_tool_call(action: ToolAction) -> str:
+        encoded = json.dumps(
+            {"arguments": action.arguments, "tool": action.tool},
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    async def _trace_committed(
+        self,
+        trace: TraceBuilder,
+        asset_id: str,
+        observations: tuple[Observation, ...],
+    ) -> None:
+        await trace.emit(
+            "observations_committed",
+            {
+                "asset_id": asset_id,
+                "observation_ids": [item.id for item in observations],
+            },
+        )
+
+    async def _trace_committed_many(
+        self,
+        trace: TraceBuilder,
+        observations: tuple[Observation, ...],
+    ) -> None:
+        by_asset: dict[str, list[str]] = {}
+        for observation in observations:
+            by_asset.setdefault(observation.asset_id, []).append(observation.id)
+        for asset_id, observation_ids in by_asset.items():
+            await trace.emit(
+                "observations_committed",
+                {"asset_id": asset_id, "observation_ids": observation_ids},
+            )
+
+    def _asset_root_ids(self) -> dict[str, str]:
+        return {asset.id: self._assets.root_id for asset in self._assets.snapshots()}
+
+    def _lineage_for_asset(self, asset_id: str) -> tuple[str, ...]:
+        snapshots = {asset.id: asset for asset in self._assets.snapshots()}
+        lineage: list[str] = []
+        current = snapshots.get(asset_id)
+        while current is not None:
+            lineage.append(current.id)
+            current = snapshots.get(current.parent_id) if current.parent_id is not None else None
+        return tuple(reversed(lineage))
+
+    def _maximum_depth(self) -> int:
+        return max((asset.derivation_depth for asset in self._assets.snapshots()), default=0)
+
+    @staticmethod
+    def _validate_question(question: str) -> str:
+        if not isinstance(question, str):
+            raise TypeError("question must be text")
+        normalized = question.strip()
+        if not normalized or "\x00" in normalized:
+            raise ValueError("question must be non-blank and NUL-free")
+        return normalized
 
     async def _run_inspection(
         self,
