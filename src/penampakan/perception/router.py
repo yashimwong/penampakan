@@ -227,8 +227,24 @@ class BackendRouter:
                             code="invalid_backend_output",
                             backend_name=descriptor.name,
                         )
-                except asyncio.CancelledError:
-                    raise
+                except asyncio.CancelledError as error:
+                    if _current_task_is_cancelling():
+                        raise
+                    unexpected_error = BackendError(
+                        code="backend_cancelled",
+                        backend_name=descriptor.name,
+                        cause=error,
+                    )
+                    attempt = self._failed_attempt(
+                        descriptor,
+                        unexpected_error,
+                        started,
+                        outcome="error",
+                    )
+                    attempts.append(attempt)
+                    warnings.append(self._fallback_warning(attempt))
+                    self._attach_failure_metadata(unexpected_error, attempts, warnings)
+                    raise unexpected_error from error
                 except asyncio.TimeoutError as error:
                     timeout_error = BackendTimeoutError(
                         code="backend_timeout",
@@ -304,7 +320,7 @@ class BackendRouter:
                 )
             raise RuntimeError("backend routing ended without a result")
         finally:
-            await self._end_call()
+            self._end_call()
 
     async def aclose(self) -> None:
         """Wait for active routes and idempotently close every owned backend."""
@@ -518,11 +534,10 @@ class BackendRouter:
             self._active_calls += 1
             self._idle.clear()
 
-    async def _end_call(self) -> None:
-        async with self._state_lock:
-            self._active_calls -= 1
-            if self._active_calls == 0:
-                self._idle.set()
+    def _end_call(self) -> None:
+        self._active_calls -= 1
+        if self._active_calls == 0:
+            self._idle.set()
 
     async def _close_owned_backends(self) -> None:
         await self._idle.wait()
@@ -530,8 +545,11 @@ class BackendRouter:
         for entry in self._entries:
             try:
                 await entry.backend.aclose()
-            except asyncio.CancelledError:
-                raise
+            except asyncio.CancelledError as error:
+                if _current_task_is_cancelling():
+                    raise
+                if first_error is None:
+                    first_error = error
             except Exception as error:
                 if first_error is None:
                     first_error = error
@@ -543,6 +561,12 @@ class BackendRouter:
     @staticmethod
     def _is_reserved(name: str) -> bool:
         return name == "penampakan" or name.startswith("penampakan.")
+
+
+def _current_task_is_cancelling() -> bool:
+    task = asyncio.current_task()
+    cancelling = getattr(task, "cancelling", None)
+    return callable(cancelling) and bool(cancelling())
 
 
 __all__ = [

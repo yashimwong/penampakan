@@ -409,7 +409,9 @@ class TraceBuilder:
             try:
                 await sink.emit(event)
             except asyncio.CancelledError:
-                raise
+                if _current_task_is_cancelling():
+                    raise
+                self._record_sink_failure(sink_id)
             except Exception:
                 self._record_sink_failure(sink_id)
 
@@ -559,7 +561,9 @@ class TraceBuilder:
             try:
                 await sink.aclose()
             except asyncio.CancelledError:
-                raise
+                if _current_task_is_cancelling():
+                    raise
+                self._record_sink_failure(id(sink))
             except Exception:
                 self._record_sink_failure(id(sink))
         self._closed = True
@@ -571,6 +575,12 @@ class TraceBuilder:
                 self._close_task = asyncio.create_task(self._close_sinks())
             close_task = self._close_task
         await asyncio.shield(close_task)
+
+
+def _current_task_is_cancelling() -> bool:
+    task = asyncio.current_task()
+    cancelling = getattr(task, "cancelling", None)
+    return callable(cancelling) and bool(cancelling())
 
 
 __all__ = [

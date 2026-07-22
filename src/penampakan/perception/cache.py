@@ -243,7 +243,12 @@ class SingleFlightCoordinator(Generic[_ValueT]):
         try:
             return await asyncio.shield(flight.future)
         finally:
-            await self._release(key, flight)
+            release_task = asyncio.create_task(self._release(key, flight))
+            try:
+                await asyncio.shield(release_task)
+            except asyncio.CancelledError:
+                release_task.add_done_callback(_consume_future)
+                raise
 
     async def aclose(self) -> None:
         """Cancel orphaned populations and close the coordinator idempotently."""
