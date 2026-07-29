@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import Callable
 from typing import Annotated, Literal, TypeVar
 
+from PIL.Image import Image as PillowImage
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from penampakan.image import transforms
+from penampakan.image.assets import PendingAsset
 from penampakan.models import Box
 from penampakan.perception.registry import ToolExecutionContext, ToolRegistry, ToolResult
 
@@ -76,11 +80,11 @@ async def _crop(context: ToolExecutionContext, arguments: BaseModel) -> ToolResu
     values = _typed(arguments, CropArguments)
     context.ensure_asset_capacity(values.asset_id, 1)
     source = context.image(values.asset_id)
-    try:
-        pending = transforms.crop(source, values.box, values.padding_fraction)
-    finally:
-        source.close()
-    return ToolResult(assets=(pending,))
+    pending = await _render(
+        source,
+        lambda: (transforms.crop(source, values.box, values.padding_fraction),),
+    )
+    return ToolResult(assets=pending)
 
 
 async def _tile(context: ToolExecutionContext, arguments: BaseModel) -> ToolResult:
@@ -88,15 +92,15 @@ async def _tile(context: ToolExecutionContext, arguments: BaseModel) -> ToolResu
     count = values.rows * values.columns
     context.ensure_asset_capacity(values.asset_id, count)
     source = context.image(values.asset_id)
-    try:
-        pending = transforms.tile(
+    pending = await _render(
+        source,
+        lambda: transforms.tile(
             source,
             rows=values.rows,
             columns=values.columns,
             overlap_fraction=values.overlap_fraction,
-        )
-    finally:
-        source.close()
+        ),
+    )
     return ToolResult(assets=pending)
 
 
@@ -104,49 +108,79 @@ async def _rotate(context: ToolExecutionContext, arguments: BaseModel) -> ToolRe
     values = _typed(arguments, RotateArguments)
     context.ensure_asset_capacity(values.asset_id, 1)
     source = context.image(values.asset_id)
-    try:
-        pending = transforms.rotate(source, values.degrees)
-    finally:
-        source.close()
-    return ToolResult(assets=(pending,))
+    pending = await _render(
+        source,
+        lambda: (transforms.rotate(source, values.degrees),),
+    )
+    return ToolResult(assets=pending)
 
 
 async def _contrast(context: ToolExecutionContext, arguments: BaseModel) -> ToolResult:
     values = _typed(arguments, ContrastArguments)
     context.ensure_asset_capacity(values.asset_id, 1)
     source = context.image(values.asset_id)
-    try:
-        pending = transforms.enhance_contrast(source, values.factor)
-    finally:
-        source.close()
-    return ToolResult(assets=(pending,))
+    pending = await _render(
+        source,
+        lambda: (transforms.enhance_contrast(source, values.factor),),
+    )
+    return ToolResult(assets=pending)
 
 
 async def _grayscale(context: ToolExecutionContext, arguments: BaseModel) -> ToolResult:
     values = _typed(arguments, GrayscaleArguments)
     context.ensure_asset_capacity(values.asset_id, 1)
     source = context.image(values.asset_id)
-    try:
-        pending = transforms.to_grayscale(source)
-    finally:
-        source.close()
-    return ToolResult(assets=(pending,))
+    pending = await _render(source, lambda: (transforms.to_grayscale(source),))
+    return ToolResult(assets=pending)
 
 
 async def _coordinate_grid(context: ToolExecutionContext, arguments: BaseModel) -> ToolResult:
     values = _typed(arguments, CoordinateGridArguments)
     context.ensure_asset_capacity(values.asset_id, 1)
     source = context.image(values.asset_id)
+    pending = await _render(
+        source,
+        lambda: (
+            transforms.add_coordinate_grid(
+                source,
+                rows=values.rows,
+                columns=values.columns,
+                labels=values.labels,
+            ),
+        ),
+    )
+    return ToolResult(assets=pending)
+
+
+async def _render(
+    source: PillowImage,
+    render: Callable[[], tuple[PendingAsset, ...]],
+) -> tuple[PendingAsset, ...]:
+    task = asyncio.create_task(asyncio.to_thread(_render_owned, source, render))
     try:
-        pending = transforms.add_coordinate_grid(
-            source,
-            rows=values.rows,
-            columns=values.columns,
-            labels=values.labels,
-        )
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        task.add_done_callback(_close_late_render)
+        raise
+
+
+def _render_owned(
+    source: PillowImage,
+    render: Callable[[], tuple[PendingAsset, ...]],
+) -> tuple[PendingAsset, ...]:
+    try:
+        return render()
     finally:
         source.close()
-    return ToolResult(assets=(pending,))
+
+
+def _close_late_render(task: asyncio.Task[tuple[PendingAsset, ...]]) -> None:
+    try:
+        pending = task.result()
+    except (asyncio.CancelledError, Exception):
+        return
+    for asset in pending:
+        asset.close()
 
 
 def register_transform_tools(registry: ToolRegistry) -> None:
