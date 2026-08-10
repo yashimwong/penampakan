@@ -1,0 +1,8 @@
+Penampakan 0.1.0
+Released 2026-08-10
+
+Initial release of bounded visual tool orchestration for text-only language
+models. It includes strict public contracts, safe image normalization,
+deterministic perception routing, evidence-grounded question answering,
+reusable asynchronous and synchronous sessions, optional local model adapters,
+redacted tracing, and experimental evaluation metrics.
