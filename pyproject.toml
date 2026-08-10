@@ -52,7 +52,6 @@ markers = [
 ]
 
 [tool.coverage.run]
-branch = true
 source = ["penampakan"]
 
 [tool.coverage.report]
