@@ -252,18 +252,13 @@ class AsyncPenampakan:
 
     def _load_store(self, source: ImageSource) -> tuple[AssetStore, tuple[WarningInfo, ...]]:
         loaded = load_image(source, self._settings.image)
-        try:
-            store = AssetStore(
-                loaded.image,
-                original_format=loaded.original_format,
-                image_limits=self._settings.image,
-                run_limits=self._settings.run,
-                canonical_png=loaded.canonical_png,
-                digest_sha256=loaded.digest_sha256,
-            )
-            return store, loaded.warnings
-        finally:
-            loaded.close()
+        load_warnings = loaded.warnings
+        store = AssetStore.from_loaded(
+            loaded,
+            image_limits=self._settings.image,
+            run_limits=self._settings.run,
+        )
+        return store, load_warnings
 
     @staticmethod
     def _close_late_store(

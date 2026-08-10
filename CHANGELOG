@@ -6,3 +6,7 @@ models. It includes strict public contracts, safe image normalization,
 deterministic perception routing, evidence-grounded question answering,
 reusable asynchronous and synchronous sessions, optional local model adapters,
 redacted tracing, and experimental evaluation metrics.
+
+Metadata inspection now reuses the loader's canonical image, uses balanced PNG
+compression, and reports reusable-session latency plus executed normalization
+and safety checks in the benchmark.

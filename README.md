@@ -85,7 +85,10 @@ The benchmark is at
 compares the latency of an end-to-end Penampakan metadata inspection with
 direct metadata decoding through Pillow, OpenCV, and ImageIO. The fixture is
 generated locally, competitors are run in rotating order over multiple rounds,
-and unavailable optional libraries are clearly reported as skipped.
+and unavailable optional libraries are clearly reported as skipped. It also
+measures Penampakan's reusable-session workflow and executes representative
+normalization, safety, and attribution checks so the additional work in the
+end-to-end path remains visible.
 
 Install the benchmark dependencies and run it from the repository root:
 
@@ -99,6 +102,7 @@ format. For example:
 
 ```bash
 python benchmarks/benchmark_metadata.py --iterations 50 --rounds 7
+python benchmarks/benchmark_metadata.py --reuse-count 50
 python benchmarks/benchmark_metadata.py --format json
 python benchmarks/benchmark_metadata.py --plot benchmarks/metadata_latency.png
 ```
@@ -106,23 +110,41 @@ python benchmarks/benchmark_metadata.py --plot benchmarks/metadata_latency.png
 Reference results captured on 10 August 2026 with Python 3.13.15 on x86-64
 WSL2 (Linux 6.18.33.2, glibc 2.43) are shown below. The run used the default
 640x480 RGBA PNG fixture (45,019 encoded bytes), 3 warmups, 20 iterations, and
-5 rounds.
+5 rounds. The primary table is the one-shot end-to-end comparison.
 
 ![Metadata inspection latency benchmark](benchmarks/metadata_latency.png)
 
 | Library | Version | Median (ms) | Min (ms) | Max (ms) | Calls/s | vs fastest |
 | --- | --- | ---: | ---: | ---: | ---: | ---: |
-| Penampakan | 0.1.0 | 187.614 | 181.504 | 196.050 | 5.3 | 63.80x |
-| Pillow (direct) | 12.3.0 | 2.941 | 2.787 | 3.067 | 340.0 | 1.00x |
-| OpenCV | 5.0.0 | 3.329 | 3.179 | 4.057 | 300.4 | 1.13x |
-| ImageIO | 2.37.4 | 4.492 | 4.410 | 4.738 | 222.6 | 1.53x |
+| Penampakan | 0.1.0 | 18.846 | 18.781 | 19.030 | 53.1 | 6.85x |
+| Pillow (direct) | 12.3.0 | 2.753 | 2.737 | 2.806 | 363.2 | 1.00x |
+| OpenCV | 5.0.0 | 3.237 | 3.129 | 3.461 | 309.0 | 1.18x |
+| ImageIO | 2.37.4 | 4.431 | 4.347 | 4.470 | 225.7 | 1.61x |
+
+The reusable workflow opens and normalizes one image, performs 20 typed
+metadata inspections, and then closes the session. Its median open latency was
+18.114 ms, each warm inspection was 0.494 ms, and close latency was 0.096 ms.
+Including the open and close costs, that is **1.432 ms per inspection
+amortized**, 13.16x faster than Penampakan's one-shot path. This is a
+Penampakan lifecycle measurement, not a ranking against the direct-library
+cases above.
+
+The same run passed six executed contract checks:
+
+- equivalent normalized metadata across PNG, JPEG, and WebP;
+- EXIF orientation before reported dimensions;
+- removal of opaque alpha while preserving real transparency;
+- documented rejection of malformed and animated inputs;
+- remote-source policy and input-byte bounds; and
+- authoritative backend provenance with a completed redacted trace.
 
 This is an overhead benchmark, not a capability or accuracy ranking. The
 Penampakan path performs bounded input handling, orientation and mode
 normalization, canonical encoding and hashing, typed result validation,
 routing, tracing, and session cleanup. The direct alternatives only decode the
-fixture and return equivalent dimensions and alpha metadata. Compare results on
-the same machine and treat very short runs as smoke tests rather than stable
+fixture and return equivalent dimensions and alpha metadata. Contract checks
+are reported separately from latency rankings. Compare results on the same
+machine and treat very short runs as smoke tests rather than stable
 measurements.
 
 ## Development

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import warnings
 from contextlib import suppress
@@ -21,9 +20,9 @@ from ..errors import (
     UnsupportedImageError,
 )
 from ..models import ImageSource, WarningInfo
+from .canonical import canonical_digest, encode_canonical_png
 
 _SUPPORTED_FORMATS = frozenset({"PNG", "JPEG", "WEBP"})
-_CANONICAL_COMPRESSION_LEVEL = 9
 _READ_CHUNK_SIZE = 64 * 1024
 
 
@@ -297,7 +296,7 @@ def _normalize_image(
     return LoadedImage(
         image=canonical_image,
         canonical_png=canonical_png,
-        digest_sha256=hashlib.sha256(canonical_png).hexdigest(),
+        digest_sha256=canonical_digest(canonical_png),
         original_format=original_format,
         warnings=warnings_result,
     )
@@ -325,17 +324,10 @@ def _drop_image_attributes(image: Image.Image) -> None:
 
 
 def _encode_canonical_png(image: Image.Image) -> bytes:
-    output = BytesIO()
     try:
-        image.save(
-            output,
-            format="PNG",
-            optimize=False,
-            compress_level=_CANONICAL_COMPRESSION_LEVEL,
-        )
+        return encode_canonical_png(image)
     except (OSError, SyntaxError, ValueError) as error:
         raise InvalidImageError(code="canonical_image_encoding_failed", cause=error) from error
-    return output.getvalue()
 
 
 def _metadata_warnings(has_icc_profile: bool) -> tuple[WarningInfo, ...]:

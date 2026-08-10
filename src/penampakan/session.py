@@ -66,7 +66,7 @@ from penampakan.reasoning.budget import RunBudget
 from penampakan.reasoning.context import CompiledContext, ContextCompiler
 from penampakan.tracing import TraceBuilder
 
-_PREPROCESSING_VERSION = "normalize-v1"
+_PREPROCESSING_VERSION = "normalize-v2"
 
 
 @dataclass(frozen=True, slots=True)

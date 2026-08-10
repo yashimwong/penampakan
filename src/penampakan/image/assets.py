@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Sequence
 from dataclasses import dataclass
-from io import BytesIO
 from typing import Literal, Protocol, cast
 
 from PIL.Image import Image as PillowImage
@@ -21,16 +19,33 @@ from penampakan.errors import (
 )
 from penampakan.models import BackendImage, ImageAsset, TransformDescriptor
 
+from .canonical import canonical_digest, encode_canonical_png
+
 OriginalFormat = Literal["PNG", "JPEG", "WEBP"] | None
 
 
 class LoadedImageLike(Protocol):
     """Normalized loader result accepted by the asset store."""
 
-    image: PillowImage
-    canonical_png: bytes
-    digest_sha256: str
-    original_format: OriginalFormat
+    @property
+    def image(self) -> PillowImage:
+        """Return the owned normalized pixels."""
+        ...
+
+    @property
+    def canonical_png(self) -> bytes:
+        """Return the canonical encoded representation."""
+        ...
+
+    @property
+    def digest_sha256(self) -> str:
+        """Return the canonical representation digest."""
+        ...
+
+    @property
+    def original_format(self) -> OriginalFormat:
+        """Return the caller-provided encoding format, when known."""
+        ...
 
     def close(self) -> None:
         """Release the loader-owned image after transfer."""
@@ -105,18 +120,10 @@ def canonical_png_bytes(image: PillowImage, limits: ImageLimits | None = None) -
     """Encode normalized pixels with the stable core PNG settings."""
     active_limits = limits or ImageLimits()
     owned = _owned_image(image, active_limits)
-    output = BytesIO()
     try:
-        owned.save(output, format="PNG", optimize=False, compress_level=9)
-        return output.getvalue()
+        return encode_canonical_png(owned)
     finally:
-        output.close()
         owned.close()
-
-
-def canonical_digest(canonical_png: bytes) -> str:
-    """Return the lowercase SHA-256 digest of canonical PNG bytes."""
-    return hashlib.sha256(canonical_png).hexdigest()
 
 
 class AssetStore:
@@ -146,22 +153,12 @@ class AssetStore:
             digest = canonical_digest(content)
             if digest_sha256 is not None and digest_sha256 != digest:
                 raise InvalidImageError()
-            asset_id = f"img_{digest[:16]}"
-            asset = ImageAsset(
-                id=asset_id,
-                width=owned.width,
-                height=owned.height,
-                mode=cast(Literal["RGB", "RGBA"], owned.mode),
-                mime_type="image/png",
+            self._install_root(
+                owned,
+                content=content,
+                digest=digest,
                 original_format=original_format,
-                digest_sha256=digest,
-                parent_id=None,
-                derivation_depth=0,
-                transform=None,
             )
-            self._records[asset_id] = _AssetRecord(asset, owned, content)
-            self._digest_ids[digest] = asset_id
-            self._root_id = asset_id
         except BaseException:
             owned.close()
             raise
@@ -190,18 +187,60 @@ class AssetStore:
         image_limits: ImageLimits | None = None,
         run_limits: RunLimits | None = None,
     ) -> AssetStore:
-        """Create a store from a normalized loader result."""
+        """Create a store from trusted normalized loader output without re-encoding it."""
+
+        active_image_limits = image_limits or ImageLimits()
+        active_run_limits = run_limits or RunLimits()
         try:
-            return cls(
-                loaded.image,
-                original_format=loaded.original_format,
-                image_limits=image_limits,
-                run_limits=run_limits,
-                canonical_png=loaded.canonical_png,
-                digest_sha256=loaded.digest_sha256,
-            )
+            owned = _owned_image(loaded.image, active_image_limits)
+            try:
+                content = bytes(loaded.canonical_png)
+                digest = canonical_digest(content)
+                if digest != loaded.digest_sha256:
+                    raise InvalidImageError()
+                store = cls.__new__(cls)
+                store._image_limits = active_image_limits
+                store._run_limits = active_run_limits
+                store._records = {}
+                store._digest_ids = {}
+                store._closed = False
+                store._install_root(
+                    owned,
+                    content=content,
+                    digest=digest,
+                    original_format=loaded.original_format,
+                )
+                return store
+            except BaseException:
+                owned.close()
+                raise
         finally:
             loaded.close()
+
+    def _install_root(
+        self,
+        owned: PillowImage,
+        *,
+        content: bytes,
+        digest: str,
+        original_format: OriginalFormat,
+    ) -> None:
+        asset_id = f"img_{digest[:16]}"
+        asset = ImageAsset(
+            id=asset_id,
+            width=owned.width,
+            height=owned.height,
+            mode=cast(Literal["RGB", "RGBA"], owned.mode),
+            mime_type="image/png",
+            original_format=original_format,
+            digest_sha256=digest,
+            parent_id=None,
+            derivation_depth=0,
+            transform=None,
+        )
+        self._records[asset_id] = _AssetRecord(asset, owned, content)
+        self._digest_ids[digest] = asset_id
+        self._root_id = asset_id
 
     def __len__(self) -> int:
         return len(self._records)

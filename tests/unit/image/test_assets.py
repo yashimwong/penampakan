@@ -98,14 +98,23 @@ def test_store_close_is_idempotent_and_rejects_access() -> None:
     source.close()
 
 
-def test_store_consumes_loaded_image_ownership() -> None:
+def test_store_consumes_loaded_image_without_reencoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     source = Image.new("RGB", (2, 2), "red")
     loaded = load_image(encode_image(source))
+    expected_content = loaded.canonical_png
+
+    def unexpected_save(*args: object, **kwargs: object) -> None:
+        raise AssertionError("trusted loaded image must not be re-encoded")
+
+    monkeypatch.setattr(Image.Image, "save", unexpected_save)
 
     store = AssetStore.from_loaded(loaded)
 
     with pytest.raises(ValueError):
         loaded.image.getbbox()
     assert store.root.original_format == "PNG"
+    assert store.content(store.root_id) == expected_content
     store.close()
     source.close()

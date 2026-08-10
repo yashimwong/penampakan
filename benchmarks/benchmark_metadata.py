@@ -20,11 +20,18 @@ from typing import Any
 from PIL import Image
 
 from penampakan import (
+    ImageLimitExceededError,
+    ImageLimits,
     InspectionOperation,
     InspectionPlan,
+    InspectionResult,
+    InvalidImageError,
     MetadataPayload,
     MetadataRequest,
     Penampakan,
+    RemoteSourceDisabledError,
+    Settings,
+    UnsupportedImageError,
     __version__,
 )
 
@@ -54,6 +61,29 @@ class BenchmarkResult:
     relative_to_fastest: float
 
 
+@dataclass(frozen=True, slots=True)
+class ReusableSessionResult:
+    """Latency breakdown for repeated inspections on one normalized image."""
+
+    calls_per_session: int
+    median_amortized_ms: float
+    min_amortized_ms: float
+    max_amortized_ms: float
+    median_open_ms: float
+    median_warm_inspection_ms: float
+    median_close_ms: float
+    speedup_vs_penampakan_one_shot: float
+
+
+@dataclass(frozen=True, slots=True)
+class ContractCheck:
+    """One executed behavior guaranteed by the Penampakan input contract."""
+
+    name: str
+    passed: bool
+    detail: str
+
+
 def _positive_int(value: str) -> int:
     parsed = int(value)
     if parsed <= 0:
@@ -75,6 +105,12 @@ def _arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--warmups", type=_non_negative_int, default=3)
     parser.add_argument("--iterations", type=_positive_int, default=20)
     parser.add_argument("--rounds", type=_positive_int, default=5)
+    parser.add_argument(
+        "--reuse-count",
+        type=_positive_int,
+        default=20,
+        help="metadata inspections to amortize over each reusable image session",
+    )
     parser.add_argument("--format", choices=("table", "json"), default="table")
     parser.add_argument(
         "--plot",
@@ -105,6 +141,43 @@ def _fixture(width: int, height: int) -> bytes:
     finally:
         output.close()
         image.close()
+
+
+def _encode_image(image: Image.Image, format_name: str, **options: Any) -> bytes:
+    output = BytesIO()
+    try:
+        image.save(output, format=format_name, **options)
+        return output.getvalue()
+    finally:
+        output.close()
+
+
+def _oriented_jpeg() -> bytes:
+    image = Image.new("RGB", (3, 2), "black")
+    try:
+        exif = Image.Exif()
+        exif[274] = 6
+        return _encode_image(image, "JPEG", exif=exif, quality=100, subsampling=0)
+    finally:
+        image.close()
+
+
+def _animated_webp() -> bytes:
+    first = Image.new("RGB", (2, 2), "red")
+    second = Image.new("RGB", (2, 2), "blue")
+    try:
+        return _encode_image(
+            first,
+            "WEBP",
+            save_all=True,
+            append_images=[second],
+            duration=100,
+            loop=0,
+            lossless=True,
+        )
+    finally:
+        first.close()
+        second.close()
 
 
 def _distribution_version(name: str, fallback: str = "unknown") -> str:
@@ -162,21 +235,29 @@ def _optional_case(
 
 
 def _penampakan_case(payload: bytes, vision: Penampakan) -> BenchmarkCase:
-    plan = InspectionPlan(
+    plan = _metadata_plan()
+
+    def inspect() -> Metadata:
+        result = vision.inspect(payload, plan)
+        return _metadata_from_result(result)
+
+    return BenchmarkCase("Penampakan", __version__, inspect)
+
+
+def _metadata_plan() -> InspectionPlan:
+    return InspectionPlan(
         operations=(InspectionOperation(request=MetadataRequest()),),
         include_available_overview=False,
     )
 
-    def inspect() -> Metadata:
-        result = vision.inspect(payload, plan)
-        if len(result.observations) != 1:
-            raise RuntimeError("Penampakan returned an unexpected observation count")
-        metadata = result.observations[0].payload
-        if not isinstance(metadata, MetadataPayload):
-            raise RuntimeError("Penampakan did not return metadata")
-        return metadata.width, metadata.height, metadata.has_alpha
 
-    return BenchmarkCase("Penampakan", __version__, inspect)
+def _metadata_from_result(result: InspectionResult) -> Metadata:
+    if len(result.observations) != 1:
+        raise RuntimeError("Penampakan returned an unexpected observation count")
+    metadata = result.observations[0].payload
+    if not isinstance(metadata, MetadataPayload):
+        raise RuntimeError("Penampakan did not return metadata")
+    return metadata.width, metadata.height, metadata.has_alpha
 
 
 def _cases(
@@ -252,10 +333,209 @@ def _run(
     ]
 
 
+def _run_reusable_session(
+    payload: bytes,
+    vision: Penampakan,
+    *,
+    expected: Metadata,
+    warmups: int,
+    calls_per_session: int,
+    rounds: int,
+    penampakan_one_shot_ms: float,
+) -> ReusableSessionResult:
+    """Measure a complete open-many-inspect-close application workflow."""
+
+    plan = _metadata_plan()
+    for _ in range(warmups):
+        with vision.open_image(payload) as session:
+            actual = _metadata_from_result(session.inspect(plan))
+            if actual != expected:
+                raise RuntimeError(
+                    f"Penampakan reusable session returned {actual!r}; expected {expected!r}"
+                )
+
+    amortized_samples: list[float] = []
+    open_samples: list[float] = []
+    inspection_samples: list[float] = []
+    close_samples: list[float] = []
+    for _ in range(rounds):
+        gc_was_enabled = gc.isenabled()
+        gc.collect()
+        if gc_was_enabled:
+            gc.disable()
+        try:
+            workflow_started = time.perf_counter_ns()
+            open_started = time.perf_counter_ns()
+            session = vision.open_image(payload)
+            open_samples.append((time.perf_counter_ns() - open_started) / 1_000_000)
+            try:
+                for _ in range(calls_per_session):
+                    inspection_started = time.perf_counter_ns()
+                    actual = _metadata_from_result(session.inspect(plan))
+                    inspection_samples.append(
+                        (time.perf_counter_ns() - inspection_started) / 1_000_000
+                    )
+                    if actual != expected:
+                        raise RuntimeError(
+                            f"Penampakan reusable session returned {actual!r}; "
+                            f"expected {expected!r}"
+                        )
+            finally:
+                close_started = time.perf_counter_ns()
+                session.close()
+                close_samples.append((time.perf_counter_ns() - close_started) / 1_000_000)
+            workflow_ms = (time.perf_counter_ns() - workflow_started) / 1_000_000
+            amortized_samples.append(workflow_ms / calls_per_session)
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+
+    median_amortized = statistics.median(amortized_samples)
+    return ReusableSessionResult(
+        calls_per_session=calls_per_session,
+        median_amortized_ms=median_amortized,
+        min_amortized_ms=min(amortized_samples),
+        max_amortized_ms=max(amortized_samples),
+        median_open_ms=statistics.median(open_samples),
+        median_warm_inspection_ms=statistics.median(inspection_samples),
+        median_close_ms=statistics.median(close_samples),
+        speedup_vs_penampakan_one_shot=penampakan_one_shot_ms / median_amortized,
+    )
+
+
+def _contract_checks(payload: bytes, vision: Penampakan) -> list[ContractCheck]:
+    """Execute representative normalization, safety, and attribution guarantees."""
+
+    plan = _metadata_plan()
+
+    def inspect(source: bytes | str) -> tuple[Metadata, InspectionResult]:
+        result = vision.inspect(source, plan)
+        return _metadata_from_result(result), result
+
+    def format_normalization() -> None:
+        image = Image.new("RGB", (7, 5), "purple")
+        try:
+            fixtures = (
+                _encode_image(image, "PNG"),
+                _encode_image(image, "JPEG", quality=100, subsampling=0),
+                _encode_image(image, "WEBP", lossless=True),
+            )
+        finally:
+            image.close()
+        for encoded in fixtures:
+            actual, _ = inspect(encoded)
+            if actual != (7, 5, False):
+                raise RuntimeError(f"format normalization returned {actual!r}")
+
+    def orientation_normalization() -> None:
+        actual, _ = inspect(_oriented_jpeg())
+        if actual != (2, 3, False):
+            raise RuntimeError(f"orientation normalization returned {actual!r}")
+
+    def alpha_normalization() -> None:
+        opaque = Image.new("RGBA", (4, 3), (255, 0, 0, 255))
+        transparent = opaque.copy()
+        transparent.putpixel((0, 0), (255, 0, 0, 0))
+        try:
+            opaque_actual, _ = inspect(_encode_image(opaque, "PNG"))
+            transparent_actual, _ = inspect(_encode_image(transparent, "PNG"))
+        finally:
+            opaque.close()
+            transparent.close()
+        if opaque_actual != (4, 3, False) or transparent_actual != (4, 3, True):
+            raise RuntimeError(
+                "alpha normalization did not distinguish opaque and transparent inputs"
+            )
+
+    def safe_rejection() -> None:
+        for source, expected_error in (
+            (b"not-an-image", InvalidImageError),
+            (_animated_webp(), UnsupportedImageError),
+        ):
+            try:
+                inspect(source)
+            except expected_error:
+                continue
+            raise RuntimeError(f"{expected_error.__name__} was not raised")
+
+    def source_policy_and_limits() -> None:
+        try:
+            inspect("https://example.test/image.png")
+        except RemoteSourceDisabledError:
+            pass
+        else:
+            raise RuntimeError("RemoteSourceDisabledError was not raised")
+        settings = Settings(image=ImageLimits(max_input_bytes=len(payload) - 1))
+        with Penampakan(settings=settings) as bounded:
+            try:
+                bounded.inspect(payload, plan)
+            except ImageLimitExceededError:
+                return
+        raise RuntimeError("ImageLimitExceededError was not raised")
+
+    def typed_attribution() -> None:
+        _, result = inspect(payload)
+        observation = result.observations[0]
+        if observation.provenance.backend_name != "penampakan.pillow":
+            raise RuntimeError("metadata provenance did not identify the authoritative backend")
+        if result.trace.summary.backend_calls != 1 or not result.trace.events:
+            raise RuntimeError("the completed inspection trace did not record the backend call")
+
+    definitions = (
+        (
+            "format_normalization",
+            "PNG, JPEG, and WebP normalize to equivalent typed metadata",
+            format_normalization,
+        ),
+        (
+            "exif_orientation",
+            "EXIF orientation is applied before dimensions are reported",
+            orientation_normalization,
+        ),
+        (
+            "alpha_semantics",
+            "opaque alpha is removed while real transparency is preserved",
+            alpha_normalization,
+        ),
+        (
+            "unsafe_input_rejection",
+            "malformed and animated inputs fail through documented errors",
+            safe_rejection,
+        ),
+        (
+            "source_policy_and_limits",
+            "remote sources and oversized inputs are rejected before perception",
+            source_policy_and_limits,
+        ),
+        (
+            "typed_attribution",
+            "metadata includes authoritative provenance and a completed redacted trace",
+            typed_attribution,
+        ),
+    )
+    checks: list[ContractCheck] = []
+    for name, detail, check in definitions:
+        try:
+            check()
+        except Exception as error:
+            checks.append(
+                ContractCheck(
+                    name=name,
+                    passed=False,
+                    detail=f"{detail}; failed with {type(error).__name__}",
+                )
+            )
+        else:
+            checks.append(ContractCheck(name=name, passed=True, detail=detail))
+    return checks
+
+
 def _payload(
     args: argparse.Namespace,
     fixture_bytes: int,
     results: Sequence[BenchmarkResult],
+    reusable_session: ReusableSessionResult,
+    contract_checks: Sequence[ContractCheck],
     skipped: Sequence[str],
 ) -> dict[str, Any]:
     return {
@@ -274,8 +554,11 @@ def _payload(
             "warmups": args.warmups,
             "iterations": args.iterations,
             "rounds": args.rounds,
+            "reuse_count": args.reuse_count,
         },
         "results": [asdict(result) for result in results],
+        "reusable_session": asdict(reusable_session),
+        "contract_checks": [asdict(check) for check in contract_checks],
         "skipped": list(skipped),
     }
 
@@ -295,6 +578,8 @@ def _table(data: dict[str, Any]) -> str:
             f"Timing: {settings['warmups']} warmups, {settings['iterations']} iterations "
             f"x {settings['rounds']} rounds"
         ),
+        "",
+        "One-shot end-to-end comparison",
         "",
     ]
     headers = ("Library", "Version", "Median ms", "Min ms", "Max ms", "Calls/s", "vs fastest")
@@ -322,6 +607,30 @@ def _table(data: dict[str, Any]) -> str:
     if data["skipped"]:
         lines.extend(("", "Skipped:"))
         lines.extend(f"- {reason}" for reason in data["skipped"])
+    reusable = data["reusable_session"]
+    lines.extend(
+        (
+            "",
+            "Reusable Penampakan session",
+            (f"Workflow: open once, inspect {reusable['calls_per_session']} times, close once"),
+            (
+                f"Median open {reusable['median_open_ms']:.3f} ms; "
+                f"warm inspection {reusable['median_warm_inspection_ms']:.3f} ms; "
+                f"close {reusable['median_close_ms']:.3f} ms"
+            ),
+            (
+                f"Amortized {reusable['median_amortized_ms']:.3f} ms/inspection "
+                f"({reusable['speedup_vs_penampakan_one_shot']:.2f}x faster than "
+                "Penampakan one-shot)"
+            ),
+            "",
+            "Executed Penampakan contract checks (not latency rankings)",
+        )
+    )
+    lines.extend(
+        f"- {'PASS' if check['passed'] else 'FAIL'} {check['name']}: {check['detail']}"
+        for check in data["contract_checks"]
+    )
     lines.extend(
         (
             "",
@@ -388,7 +697,7 @@ def _plot(data: dict[str, Any], output: Path) -> None:
         axis.set_yticks(positions, names)
         axis.invert_yaxis()
         axis.set_xlabel("Median latency per inspection (milliseconds, log scale)")
-        axis.set_title("Metadata inspection latency — lower is better", loc="left", pad=20)
+        axis.set_title("One-shot metadata latency — lower is better", loc="left", pad=20)
         axis.grid(axis="x", which="both", color="#d8dee4", linewidth=0.8, alpha=0.8)
         axis.set_axisbelow(True)
         axis.spines[["top", "right", "left"]].set_visible(False)
@@ -396,7 +705,7 @@ def _plot(data: dict[str, Any], output: Path) -> None:
 
         figure.text(
             0.125,
-            0.015,
+            0.035,
             (
                 f"{fixture['width']}x{fixture['height']} RGBA PNG; "
                 f"{settings['iterations']} iterations x {settings['rounds']} rounds. "
@@ -405,7 +714,22 @@ def _plot(data: dict[str, Any], output: Path) -> None:
             color="#57606a",
             fontsize=9,
         )
-        figure.tight_layout(rect=(0, 0.06, 1, 1))
+        reusable = data["reusable_session"]
+        passed = sum(check["passed"] for check in data["contract_checks"])
+        total = len(data["contract_checks"])
+        figure.text(
+            0.125,
+            0.012,
+            (
+                f"Reusable Penampakan session: {reusable['median_amortized_ms']:.3f} ms "
+                f"amortized over {reusable['calls_per_session']} inspections; "
+                f"normalization and safety checks: {passed}/{total} passed."
+            ),
+            color="#287a4b",
+            fontsize=9,
+            fontweight="bold",
+        )
+        figure.tight_layout(rect=(0, 0.09, 1, 1))
         output.parent.mkdir(parents=True, exist_ok=True)
         figure.savefig(output, dpi=180, bbox_inches="tight")
         plt.close(figure)
@@ -425,8 +749,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             iterations=args.iterations,
             rounds=args.rounds,
         )
+        penampakan_result = next(result for result in results if result.name == "Penampakan")
+        reusable_session = _run_reusable_session(
+            encoded,
+            vision,
+            expected=expected,
+            warmups=args.warmups,
+            calls_per_session=args.reuse_count,
+            rounds=args.rounds,
+            penampakan_one_shot_ms=penampakan_result.median_ms,
+        )
+        contract_checks = _contract_checks(encoded, vision)
 
-    data = _payload(args, len(encoded), results, skipped)
+    data = _payload(
+        args,
+        len(encoded),
+        results,
+        reusable_session,
+        contract_checks,
+        skipped,
+    )
     if args.plot is not None:
         _plot(data, args.plot)
     if args.format == "json":
@@ -434,7 +776,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.write("\n")
     else:
         print(_table(data))
-    return 0
+    return 0 if all(check.passed for check in contract_checks) else 1
 
 
 if __name__ == "__main__":
