@@ -389,6 +389,26 @@ async def test_cancellation_propagates_without_fallback_and_router_recovers() ->
     await router.aclose()
 
 
+async def test_backend_cancellation_is_a_backend_failure_without_fallback() -> None:
+    cancelled = ScriptedBackend(
+        "example.cancelled",
+        outcomes=(asyncio.CancelledError(),),
+    )
+    untouched = ScriptedBackend("example.untouched")
+    router = BackendRouter((cancelled, untouched))
+
+    with pytest.raises(BackendError) as captured:
+        await router.analyze(make_backend_image(), CaptionRequest())
+
+    assert captured.value.code == "backend_cancelled"
+    assert untouched.requests == []
+    assert tuple(attempt.outcome for attempt in route_failure_attempts(captured.value)) == (
+        "error",
+    )
+
+    await router.aclose()
+
+
 async def test_close_waits_for_active_route_and_is_concurrently_idempotent() -> None:
     backend = ScriptedBackend("example.owned")
     backend.gate = asyncio.Event()

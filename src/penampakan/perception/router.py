@@ -6,6 +6,7 @@ import asyncio
 import math
 import time
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Literal, cast
 
@@ -69,6 +70,14 @@ class _BackendEntry:
     descriptor: BackendDescriptor
     semaphore: asyncio.Semaphore
     registration_index: int
+
+
+class _BackendCancelledError(Exception):
+    """Distinguish backend cancellation from cancellation of the routing task."""
+
+    def __init__(self, cause: asyncio.CancelledError) -> None:
+        super().__init__("the backend invocation was cancelled")
+        self.cause = cause
 
 
 def route_failure_attempts(error: BaseException) -> tuple[RouteAttempt, ...]:
@@ -217,9 +226,10 @@ class BackendRouter:
                 if before_attempt is not None:
                     await before_attempt(descriptor)
                 started = time.monotonic()
+                invocation = asyncio.create_task(self._invoke(entry, image, request))
                 try:
                     result = await asyncio.wait_for(
-                        self._invoke(entry, image, request),
+                        asyncio.shield(invocation),
                         timeout=effective_timeout,
                     )
                     if not isinstance(result, VisionResult):
@@ -227,13 +237,14 @@ class BackendRouter:
                             code="invalid_backend_output",
                             backend_name=descriptor.name,
                         )
-                except asyncio.CancelledError as error:
-                    if _current_task_is_cancelling():
-                        raise
+                except asyncio.CancelledError:
+                    await self._cancel_invocation(invocation)
+                    raise
+                except _BackendCancelledError as error:
                     unexpected_error = BackendError(
                         code="backend_cancelled",
                         backend_name=descriptor.name,
-                        cause=error,
+                        cause=error.cause,
                     )
                     attempt = self._failed_attempt(
                         descriptor,
@@ -244,8 +255,9 @@ class BackendRouter:
                     attempts.append(attempt)
                     warnings.append(self._fallback_warning(attempt))
                     self._attach_failure_metadata(unexpected_error, attempts, warnings)
-                    raise unexpected_error from error
+                    raise unexpected_error from error.cause
                 except asyncio.TimeoutError as error:
+                    await self._cancel_invocation(invocation)
                     timeout_error = BackendTimeoutError(
                         code="backend_timeout",
                         backend_name=descriptor.name,
@@ -459,8 +471,17 @@ class BackendRouter:
         image: BackendImage,
         request: VisionRequest,
     ) -> VisionResult:
-        async with entry.semaphore:
-            return await entry.backend.analyze(image, request)
+        try:
+            async with entry.semaphore:
+                return await entry.backend.analyze(image, request)
+        except asyncio.CancelledError as error:
+            raise _BackendCancelledError(error) from error
+
+    @staticmethod
+    async def _cancel_invocation(invocation: asyncio.Task[VisionResult]) -> None:
+        invocation.cancel()
+        with suppress(BaseException):
+            await invocation
 
     def _effective_timeout(self, timeout_s: float | None) -> float:
         if timeout_s is None:
