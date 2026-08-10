@@ -14,6 +14,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from importlib.metadata import PackageNotFoundError, version
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 
 from PIL import Image
@@ -75,6 +76,11 @@ def _arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--iterations", type=_positive_int, default=20)
     parser.add_argument("--rounds", type=_positive_int, default=5)
     parser.add_argument("--format", choices=("table", "json"), default="table")
+    parser.add_argument(
+        "--plot",
+        type=Path,
+        help="write a Matplotlib latency chart to this path (for example, benchmark.png)",
+    )
     return parser.parse_args(argv)
 
 
@@ -326,6 +332,85 @@ def _table(data: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _plot(data: dict[str, Any], output: Path) -> None:
+    """Render median latency and the observed min-max range on a log scale."""
+
+    try:
+        import matplotlib
+    except ImportError as error:
+        raise RuntimeError(
+            "plotting requires the benchmark extra: pip install -e '.[benchmark]'"
+        ) from error
+
+    matplotlib.use("Agg")
+    from matplotlib import pyplot as plt
+
+    results = data["results"]
+    fixture = data["fixture"]
+    settings = data["settings"]
+    names = [result["name"] for result in results]
+    medians = [result["median_ms"] for result in results]
+    minimums = [result["min_ms"] for result in results]
+    maximums = [result["max_ms"] for result in results]
+    positions = list(range(len(results)))
+    colors = ["#d1495b" if name == "Penampakan" else "#3977a8" for name in names]
+
+    with plt.rc_context(
+        {
+            "axes.edgecolor": "#d0d7de",
+            "axes.labelcolor": "#24292f",
+            "font.size": 11,
+            "text.color": "#24292f",
+            "xtick.color": "#57606a",
+            "ytick.color": "#24292f",
+        }
+    ):
+        figure, axis = plt.subplots(figsize=(9.2, 5.2))
+        figure.patch.set_facecolor("white")
+        axis.set_facecolor("white")
+
+        for position, median, minimum, maximum, color in zip(
+            positions, medians, minimums, maximums, colors, strict=True
+        ):
+            axis.hlines(position, minimum, maximum, color=color, linewidth=4, alpha=0.55)
+            axis.scatter(median, position, color=color, edgecolor="white", s=110, zorder=3)
+            axis.annotate(
+                f"{median:.3f} ms",
+                (median, position),
+                xytext=(9, 0),
+                textcoords="offset points",
+                va="center",
+                fontweight="bold",
+            )
+
+        axis.set_xscale("log")
+        axis.set_xlim(min(minimums) * 0.65, max(maximums) * 1.8)
+        axis.set_yticks(positions, names)
+        axis.invert_yaxis()
+        axis.set_xlabel("Median latency per inspection (milliseconds, log scale)")
+        axis.set_title("Metadata inspection latency — lower is better", loc="left", pad=20)
+        axis.grid(axis="x", which="both", color="#d8dee4", linewidth=0.8, alpha=0.8)
+        axis.set_axisbelow(True)
+        axis.spines[["top", "right", "left"]].set_visible(False)
+        axis.tick_params(axis="y", length=0, pad=10)
+
+        figure.text(
+            0.125,
+            0.015,
+            (
+                f"{fixture['width']}x{fixture['height']} RGBA PNG; "
+                f"{settings['iterations']} iterations x {settings['rounds']} rounds. "
+                "Lines show the observed min-max range."
+            ),
+            color="#57606a",
+            fontsize=9,
+        )
+        figure.tight_layout(rect=(0, 0.06, 1, 1))
+        output.parent.mkdir(parents=True, exist_ok=True)
+        figure.savefig(output, dpi=180, bbox_inches="tight")
+        plt.close(figure)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _arguments(argv)
     encoded = _fixture(args.width, args.height)
@@ -342,6 +427,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
     data = _payload(args, len(encoded), results, skipped)
+    if args.plot is not None:
+        _plot(data, args.plot)
     if args.format == "json":
         json.dump(data, sys.stdout, indent=2)
         sys.stdout.write("\n")

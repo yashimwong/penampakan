@@ -31,6 +31,7 @@ ocr = ["pytesseract>=0.3.10"]
 transformers = ["transformers>=4.40,<5", "torch>=2.1"]
 benchmark = [
   "imageio>=2.31",
+  "matplotlib>=3.8",
   "numpy>=1.23",
   "opencv-python-headless>=4.8",
 ]

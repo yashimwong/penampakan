@@ -100,7 +100,22 @@ format. For example:
 ```bash
 python benchmarks/benchmark_metadata.py --iterations 50 --rounds 7
 python benchmarks/benchmark_metadata.py --format json
+python benchmarks/benchmark_metadata.py --plot benchmarks/metadata_latency.png
 ```
+
+Reference results captured on 10 August 2026 with Python 3.13.15 on x86-64
+WSL2 (Linux 6.18.33.2, glibc 2.43) are shown below. The run used the default
+640x480 RGBA PNG fixture (45,019 encoded bytes), 3 warmups, 20 iterations, and
+5 rounds.
+
+![Metadata inspection latency benchmark](benchmarks/metadata_latency.png)
+
+| Library | Version | Median (ms) | Min (ms) | Max (ms) | Calls/s | vs fastest |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| Penampakan | 0.1.0 | 187.614 | 181.504 | 196.050 | 5.3 | 63.80x |
+| Pillow (direct) | 12.3.0 | 2.941 | 2.787 | 3.067 | 340.0 | 1.00x |
+| OpenCV | 5.0.0 | 3.329 | 3.179 | 4.057 | 300.4 | 1.13x |
+| ImageIO | 2.37.4 | 4.492 | 4.410 | 4.738 | 222.6 | 1.53x |
 
 This is an overhead benchmark, not a capability or accuracy ranking. The
 Penampakan path performs bounded input handling, orientation and mode
