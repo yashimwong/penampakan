@@ -6,6 +6,7 @@ build-backend = "hatchling.build"
 name = "penampakan"
 version = "0.1.0"
 description = "Safe visual tool orchestration for text-only language models"
+readme = "README.md"
 requires-python = ">=3.10,<3.14"
 license = { text = "MIT" }
 authors = [{ name = "Penampakan contributors" }]
@@ -28,6 +29,11 @@ dependencies = [
 [project.optional-dependencies]
 ocr = ["pytesseract>=0.3.10"]
 transformers = ["transformers>=4.40,<5", "torch>=2.1"]
+benchmark = [
+  "imageio>=2.31",
+  "numpy>=1.23",
+  "opencv-python-headless>=4.8",
+]
 dev = [
   "build>=1.2",
   "hypothesis>=6.100",

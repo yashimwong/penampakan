@@ -31,6 +31,10 @@ def test_distribution_metadata_declares_dependencies_and_extras() -> None:
         for item in dependencies
     )
     assert any(
+        item.marker is not None and 'extra == "benchmark"' in str(item.marker)
+        for item in dependencies
+    )
+    assert any(
         item.marker is not None and 'extra == "dev"' in str(item.marker) for item in dependencies
     )
 
