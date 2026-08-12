@@ -287,6 +287,11 @@ class BackendDescriptor(_FrozenModel):
     is_remote: bool = False
     max_concurrency: Annotated[int, Field(gt=0)] = 1
 
+    @property
+    def durable_cache_eligible(self) -> bool:
+        """Return whether this identity is exact enough for durable cross-process caching."""
+        return self.model_id is None or self.model_revision is not None
+
     @field_validator("capabilities")
     @classmethod
     def _unique_capabilities(

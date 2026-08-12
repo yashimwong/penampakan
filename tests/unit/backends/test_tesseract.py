@@ -131,7 +131,9 @@ def test_construction_and_capability_discovery_do_not_import_optional_extra(
 
     assert imports == []
     assert descriptor.name == "tesseract"
-    assert descriptor.model_id == "eng+deu"
+    assert descriptor.model_id is None
+    assert descriptor.durable_cache_eligible is True
+    assert descriptor.version.startswith("1.0+lang.eng+deu+config.")
     assert descriptor.max_concurrency == 3
     assert descriptor.capabilities[0].capability is Capability.OCR
     assert descriptor.capabilities[0].features == frozenset({"ocr.languages", "ocr.word_boxes"})
@@ -413,3 +415,19 @@ async def test_close_waits_for_active_call_and_rejects_later_work(
     await backend.aclose()
     with pytest.raises(SessionClosedError):
         await backend.analyze(_backend_image(), OCRRequest())
+
+
+def test_language_and_configuration_selection_change_the_backend_version() -> None:
+    baseline = TesseractBackend()
+    other_languages = TesseractBackend(languages=("deu",))
+    configured = TesseractBackend(config="--oem 1")
+    other_config = TesseractBackend(config="--oem 0")
+
+    assert baseline.descriptor.version == "1.0+lang.eng"
+    assert other_languages.descriptor.version == "1.0+lang.deu"
+    assert configured.descriptor.version != baseline.descriptor.version
+    assert configured.descriptor.version != other_config.descriptor.version
+    # An engine backend never reports an unresolved model revision.
+    assert baseline.descriptor.model_id is None
+    assert baseline.descriptor.model_revision is None
+    assert baseline.descriptor.durable_cache_eligible is True

@@ -1022,3 +1022,144 @@ async def test_client_close_waits_for_active_session_without_cancelling_it(
     assert idle.closed is True
     assert client.closed is True
     assert close_count == 1
+
+
+class _RecordingCache:
+    def __init__(self, *, durable: bool) -> None:
+        self.durable = durable
+        self.gets: list[str] = []
+        self.sets: list[str] = []
+        self._entries: dict[str, bytes] = {}
+
+    async def get(self, key: str) -> bytes | None:
+        self.gets.append(key)
+        return self._entries.get(key)
+
+    async def set(self, key: str, value: bytes, *, size: int) -> None:
+        self.sets.append(key)
+        self._entries[key] = value
+
+    async def aclose(self) -> None:
+        self._entries.clear()
+
+
+class _ModelCaptionBackend:
+    def __init__(self, *, model_revision: str | None, delay_s: float = 0.0) -> None:
+        self._descriptor = BackendDescriptor(
+            name="tests.model_caption",
+            version="1.0",
+            model_id="org/caption",
+            model_revision=model_revision,
+            capabilities=(CapabilityDescriptor(capability=Capability.CAPTION),),
+            max_concurrency=4,
+        )
+        self._delay_s = delay_s
+        self.calls = 0
+
+    @property
+    def descriptor(self) -> BackendDescriptor:
+        return self._descriptor
+
+    def supports(self, request: VisionRequest) -> bool:
+        return isinstance(request, CaptionRequest)
+
+    async def analyze(self, image: BackendImage, request: VisionRequest) -> VisionResult:
+        assert isinstance(request, CaptionRequest)
+        self.calls += 1
+        if self._delay_s:
+            await asyncio.sleep(self._delay_s)
+        return _caption_result(request, "A four-color image")
+
+    async def aclose(self) -> None:
+        return None
+
+
+def _duplicate_caption_plan(count: int = 2) -> InspectionPlan:
+    return InspectionPlan(
+        operations=tuple(InspectionOperation(request=CaptionRequest()) for _ in range(count)),
+        include_available_overview=False,
+    )
+
+
+@pytest.mark.asyncio
+async def test_durable_cache_is_bypassed_for_unresolved_model_weights(
+    image_bytes: bytes,
+) -> None:
+    backend = _ModelCaptionBackend(model_revision=None, delay_s=0.05)
+    cache = _RecordingCache(durable=True)
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        cache=cache,
+        settings=_settings(()),
+    ) as client:
+        first = await client.inspect(image_bytes, _duplicate_caption_plan())
+        second = await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    assert cache.gets == []
+    assert cache.sets == []
+    assert backend.calls == 2
+    assert len(first.observations) == 2
+    assert sum(item.provenance.cache_hit for item in first.observations) == 1
+    assert second.observations[0].provenance.cache_hit is False
+    assert second.observations[0].provenance.model_revision is None
+
+
+@pytest.mark.asyncio
+async def test_durable_cache_is_used_for_resolved_model_weights(image_bytes: bytes) -> None:
+    backend = _ModelCaptionBackend(model_revision="a" * 40, delay_s=0.05)
+    cache = _RecordingCache(durable=True)
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        cache=cache,
+        settings=_settings(()),
+    ) as client:
+        await client.inspect(image_bytes, _duplicate_caption_plan())
+        second = await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    assert len(cache.sets) == 1
+    assert cache.gets[0] == cache.sets[0]
+    assert backend.calls == 1
+    assert second.observations[0].provenance.cache_hit is True
+    assert second.observations[0].provenance.model_revision == "a" * 40
+
+
+@pytest.mark.asyncio
+async def test_non_durable_cache_serves_unresolved_model_weights(image_bytes: bytes) -> None:
+    backend = _ModelCaptionBackend(model_revision=None, delay_s=0.05)
+    cache = _RecordingCache(durable=False)
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        cache=cache,
+        settings=_settings(()),
+    ) as client:
+        await client.inspect(image_bytes, _duplicate_caption_plan())
+        second = await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    assert len(cache.sets) == 1
+    assert len(cache.gets) == 3
+    assert backend.calls == 1
+    assert second.observations[0].provenance.cache_hit is True
+    assert second.observations[0].provenance.model_revision is None
+
+
+@pytest.mark.asyncio
+async def test_durable_cache_bypass_keeps_single_flight_deduplication(
+    image_bytes: bytes,
+) -> None:
+    backend = _ModelCaptionBackend(model_revision=None, delay_s=0.1)
+    cache = _RecordingCache(durable=True)
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        cache=cache,
+        settings=_settings(()),
+    ) as client:
+        result = await client.inspect(image_bytes, _duplicate_caption_plan(3))
+
+    assert backend.calls == 1
+    assert len(result.observations) == 3
+    assert cache.gets == []
+    assert cache.sets == []

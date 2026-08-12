@@ -10,3 +10,37 @@ redacted tracing, and experimental evaluation metrics.
 Metadata inspection now reuses the loader's canonical image, uses balanced PNG
 compression, and reports reusable-session latency plus executed normalization
 and safety checks in the benchmark.
+
+Client shutdown now attempts every owned resource in a documented dependency
+order even when one of them fails. Ordinary close failures are recorded as
+redacted warnings on the new AsyncPenampakan.close_warnings property, while the
+first cancellation or other base exception is retained, propagated once the
+remaining cleanup has been attempted, and never displaced by a later ordinary
+failure; ADR 0002 records why the public close re-raises it. Backend ownership
+moved from a process-global set of raw addresses to a weak identity registry, so
+address reuse, garbage collection, unusual hashing or equality, and stale
+weak-reference callbacks can no longer reject or steal an unrelated backend, and
+a backend that cannot be weakly referenced is accepted instead of rejected.
+
+Application callables supplied to the callable vision backend and the callable
+text language model are now inspected before dispatch, so an asynchronous
+callable, including a functools.partial or an object with an asynchronous
+__call__, is awaited on the event loop instead of consuming a worker thread
+merely to construct its coroutine.
+
+Model-backed adapters now resolve the exact loaded-weight identity from an
+explicit commit revision or the local Hugging Face cache snapshot, and report an
+unresolved_model_revision warning on every result when they cannot. An
+unresolved backend is excluded from durable caches through the new
+BackendDescriptor.durable_cache_eligible property while in-process
+deduplication and ephemeral memory caching remain available. The Tesseract
+backend no longer claims a model identity and instead reports its language and
+configuration selection in its backend version.
+
+A new lineage benchmark drives a saturated reasoning session at the configured
+maximum of sixteen derived assets and three derivation levels, then attributes
+session wall time to the asset-lineage and context scans. Those scans cost
+0.046 ms of a 71 ms session, or 0.065%, so the asset-lineage optimization is
+deferred with a documented budget of 1.0 ms per session and 0.15 ms per
+reasoning step, recorded in ADR 0001. The store-owned root lookup that
+multi-image sessions require for correctness is unaffected.

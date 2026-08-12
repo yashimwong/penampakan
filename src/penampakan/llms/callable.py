@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from collections.abc import Awaitable, Callable
 
+from penampakan._callables import call_async_or_thread
 from penampakan.models import LLMRequest, LLMResponse
 
 CompleteCallable = Callable[
@@ -36,9 +36,7 @@ class CallableTextLLM:
         """Invoke the application callable without blocking the event loop."""
         if self._close_task is not None:
             raise RuntimeError("language model is closed")
-        result = await asyncio.to_thread(self._complete, request)
-        if inspect.isawaitable(result):
-            result = await result
+        result = await call_async_or_thread(self._complete, request)
         if isinstance(result, str):
             return LLMResponse(text=result)
         return LLMResponse.model_validate(result, strict=True)
@@ -52,9 +50,7 @@ class CallableTextLLM:
     async def _run_close(self) -> None:
         if self._close is None:
             return
-        result = await asyncio.to_thread(self._close)
-        if inspect.isawaitable(result):
-            await result
+        await call_async_or_thread(self._close)
 
 
 __all__ = ["CallableTextLLM", "CloseCallable", "CompleteCallable"]

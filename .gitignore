@@ -1,4 +1,5 @@
 .coverage
+.env
 .hypothesis/
 .mypy_cache/
 .pytest_cache/
@@ -11,3 +12,4 @@ htmlcov/
 *.egg-info/
 *.py[cod]
 !README.md
+specs

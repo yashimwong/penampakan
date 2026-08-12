@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib
 import math
 import os
@@ -131,8 +132,7 @@ class TesseractBackend:
         concurrency = self._validate_concurrency(max_concurrency)
         self._descriptor = BackendDescriptor(
             name=_BACKEND_NAME,
-            version=_ADAPTER_VERSION,
-            model_id="+".join(self._languages),
+            version=self._preprocessing_version(self._languages, self._config),
             capabilities=(
                 CapabilityDescriptor(
                     capability=Capability.OCR,
@@ -614,6 +614,25 @@ class TesseractBackend:
         if len(languages) != len(set(languages)):
             raise ValueError("languages must be unique")
         return languages
+
+    @staticmethod
+    def _preprocessing_version(languages: tuple[str, ...], config: str) -> str:
+        """Return the adapter version with its construction-time OCR selections.
+
+        Tesseract is an engine rather than a model, so it reports no model
+        identity and never claims an unresolved model revision. Its default
+        language set and configuration string are not part of a normalized
+        ``OCRRequest`` yet still change results, so they belong in the
+        preprocessing version that the perception cache key covers. The
+        Tesseract runtime version itself is only knowable by executing the
+        binary, which the lazy diagnosis defers to the first analysis, so it
+        cannot appear in a descriptor that must be stable from construction.
+        """
+        version = f"{_ADAPTER_VERSION}+lang.{'+'.join(languages)}"
+        if not config:
+            return version
+        digest = hashlib.sha256(config.encode("utf-8")).hexdigest()[:16]
+        return f"{version}+config.{digest}"
 
     @staticmethod
     def _validate_config(value: str) -> str:

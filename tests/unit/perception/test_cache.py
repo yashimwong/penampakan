@@ -20,6 +20,7 @@ from penampakan.perception.cache import (
     SingleFlightCoordinator,
     build_perception_cache_key,
     canonical_request_json,
+    is_durable_cache,
 )
 
 
@@ -211,6 +212,54 @@ def test_cache_key_changes_for_every_perception_dimension() -> None:
     assert len(baseline) == 64
     assert all(character in "0123456789abcdef" for character in baseline)
     assert len(set((baseline, *variants))) == len(variants) + 1
+
+
+def test_cache_key_misses_across_model_revisions_of_one_model() -> None:
+    resolved = _backend(model_revision="a" * 40)
+    other_snapshot = _backend(model_revision="b" * 40)
+    unresolved = _backend(model_revision=None)
+
+    keys = (
+        _cache_key(backend=resolved),
+        _cache_key(backend=other_snapshot),
+        _cache_key(backend=unresolved),
+    )
+
+    assert len(set(keys)) == 3
+    assert _cache_key(backend=resolved) == _cache_key(backend=_backend(model_revision="a" * 40))
+
+
+@pytest.mark.parametrize(
+    ("model_id", "model_revision", "eligible"),
+    [
+        (None, None, True),
+        (None, "a" * 40, True),
+        ("caption-model", "a" * 40, True),
+        ("caption-model", None, False),
+    ],
+)
+def test_durable_cache_eligibility_truth_table(
+    model_id: str | None,
+    model_revision: str | None,
+    eligible: bool,
+) -> None:
+    descriptor = _backend(model_id=model_id, model_revision=model_revision)
+
+    assert descriptor.durable_cache_eligible is eligible
+
+
+def test_process_local_caches_are_not_durable() -> None:
+    class DurableCache(NullCache):
+        durable = True
+
+    class ConfusedCache(NullCache):
+        durable = "yes"  # type: ignore[assignment]
+
+    assert is_durable_cache(NullCache()) is False
+    assert is_durable_cache(MemoryLRUCache()) is False
+    assert is_durable_cache(object()) is False
+    assert is_durable_cache(DurableCache()) is True
+    assert is_durable_cache(ConfusedCache()) is False
 
 
 def test_cache_key_is_deterministic_and_validates_components() -> None:

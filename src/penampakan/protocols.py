@@ -61,7 +61,14 @@ class ActionPolicy(Protocol):
 
 
 class Cache(Protocol):
-    """Asynchronous byte cache for versioned validated JSON values."""
+    """Asynchronous byte cache for versioned validated JSON values.
+
+    An implementation MAY expose a ``durable: bool`` attribute declaring that
+    entries survive the current process; an absent attribute means non-durable.
+    A durable cache is bypassed for backends whose descriptor is not
+    ``durable_cache_eligible``, because their results cannot be attributed to an
+    exact weight identity across processes.
+    """
 
     async def get(self, key: str) -> bytes | None:
         """Return the cached bytes for a key or a cache miss."""

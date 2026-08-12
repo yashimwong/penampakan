@@ -1,15 +1,19 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import threading
+import weakref
 from typing import cast
 
 import pytest
 from PIL import Image
 
+from penampakan import client as client_module
 from penampakan.client import AsyncPenampakan
 from penampakan.config import AgentSettings, CacheSettings, Settings
 from penampakan.errors import (
+    BackendError,
     ConfigurationError,
     InvalidImageError,
     OperationTimeoutError,
@@ -39,7 +43,9 @@ from penampakan.models import (
     VisionRequest,
     VisionResult,
 )
-from penampakan.perception.cache import MemoryLRUCache, NullCache
+from penampakan.perception.cache import MemoryLRUCache, NullCache, SingleFlightCoordinator
+from penampakan.perception.router import BackendRouter
+from penampakan.protocols import Cache, TraceSink
 from penampakan.session import AsyncVisionSession
 from tests.fixtures.images import encode_image
 from tests.unit.reasoning.helpers import ScriptedPolicy
@@ -569,3 +575,376 @@ async def test_backend_cache_and_sink_close_failures_are_best_effort() -> None:
     await successor.aclose()
 
     assert backend.close_calls == 2
+
+
+class RecordingCloser:
+    """An owned resource that records its close attempt and may fail."""
+
+    def __init__(
+        self,
+        name: str,
+        log: list[str],
+        error: BaseException | None = None,
+        *,
+        started: asyncio.Event | None = None,
+        gate: asyncio.Event | None = None,
+    ) -> None:
+        self.name = name
+        self.log = log
+        self.error = error
+        self.started = started
+        self.gate = gate
+        self.close_calls = 0
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+        self.log.append(self.name)
+        if self.started is not None:
+            self.started.set()
+        if self.gate is not None:
+            await self.gate.wait()
+        if self.error is not None:
+            raise self.error
+
+
+class RecordingIdle:
+    """An idle gate that records the drain attempt and may fail."""
+
+    def __init__(self, log: list[str], error: BaseException | None = None) -> None:
+        self.log = log
+        self.error = error
+
+    async def wait(self) -> bool:
+        self.log.append("active_operations")
+        if self.error is not None:
+            raise self.error
+        return True
+
+
+_CLOSE_POSITIONS = (
+    "active_operations",
+    "session",
+    "singleflight",
+    "router",
+    "cache",
+    "trace_sink_0",
+)
+
+
+def _instrument_close(
+    client: AsyncPenampakan,
+    failures: dict[str, BaseException],
+) -> list[str]:
+    log: list[str] = []
+    client._idle = cast(asyncio.Event, RecordingIdle(log, failures.get("active_operations")))
+    session = RecordingCloser("session", log, failures.get("session"))
+    client._sessions.add(cast(AsyncVisionSession, session))
+    client._singleflight = cast(
+        SingleFlightCoordinator[bytes],
+        RecordingCloser("singleflight", log, failures.get("singleflight")),
+    )
+    client._router = cast(BackendRouter, RecordingCloser("router", log, failures.get("router")))
+    client._cache = cast(Cache, RecordingCloser("cache", log, failures.get("cache")))
+    client._trace_sinks = (
+        cast(TraceSink, RecordingCloser("trace_sink_0", log, failures.get("trace_sink_0"))),
+    )
+    return log
+
+
+@pytest.mark.parametrize("position", _CLOSE_POSITIONS)
+async def test_ordinary_close_failure_warns_and_attempts_every_remaining_resource(
+    position: str,
+) -> None:
+    backend = RecordingBackend(f"example.ordinary_{position}")
+    client = AsyncPenampakan(backends=(backend,))
+    log = _instrument_close(client, {position: RuntimeError("close sentinel")})
+
+    await client.aclose()
+
+    assert log == list(_CLOSE_POSITIONS)
+    assert client.closed is True
+    assert [warning.details["resource"] for warning in client.close_warnings] == [position]
+    assert client.close_warnings[0].code == "owned_resource_close_failed"
+    assert client.close_warnings[0].details["error_type"] == "RuntimeError"
+    assert id(backend) not in client_module._BACKEND_OWNERS
+
+
+@pytest.mark.parametrize("position", _CLOSE_POSITIONS)
+@pytest.mark.parametrize(
+    "factory",
+    (asyncio.CancelledError, KeyboardInterrupt, SystemExit, GeneratorExit),
+    ids=("cancelled", "keyboard_interrupt", "system_exit", "generator_exit"),
+)
+async def test_base_close_failure_propagates_after_complete_cleanup(
+    position: str,
+    factory: type[BaseException],
+) -> None:
+    backend = RecordingBackend(f"example.base_{factory.__name__.lower()}_{position}")
+    client = AsyncPenampakan(backends=(backend,))
+    injected = factory()
+    log = _instrument_close(client, {position: injected})
+
+    with pytest.raises(factory) as captured:
+        await client.aclose()
+
+    assert captured.value is injected
+    assert log == list(_CLOSE_POSITIONS)
+    assert client.closed is True
+    assert client.close_warnings == ()
+    assert id(backend) not in client_module._BACKEND_OWNERS
+
+    successor = AsyncPenampakan(backends=(backend,))
+    await successor.aclose()
+
+
+async def test_first_base_exception_survives_later_close_failures() -> None:
+    client = AsyncPenampakan()
+    primary = asyncio.CancelledError()
+    log = _instrument_close(
+        client,
+        {
+            "session": primary,
+            "router": SystemExit(),
+            "cache": RuntimeError("late ordinary sentinel"),
+        },
+    )
+
+    with pytest.raises(asyncio.CancelledError) as captured:
+        await client.aclose()
+
+    assert captured.value is primary
+    assert log == list(_CLOSE_POSITIONS)
+    assert [warning.details["resource"] for warning in client.close_warnings] == ["cache"]
+
+
+async def _close_outcome(client: AsyncPenampakan) -> BaseException | None:
+    try:
+        await client.aclose()
+    except BaseException as error:
+        return error
+    return None
+
+
+async def test_concurrent_and_repeated_closes_share_one_attempt_and_outcome() -> None:
+    client = AsyncPenampakan()
+    primary = KeyboardInterrupt()
+    log = _instrument_close(client, {"singleflight": primary})
+
+    # A task that lets KeyboardInterrupt escape hands it to the event loop, so
+    # each concurrent close reports its own outcome from inside its coroutine.
+    results = await asyncio.gather(*(_close_outcome(client) for _ in range(3)))
+    repeated = await asyncio.gather(*(_close_outcome(client) for _ in range(1)))
+
+    assert log == list(_CLOSE_POSITIONS)
+    assert all(result is primary for result in (*results, *repeated))
+
+
+async def test_cancelled_caller_waits_for_protected_cleanup_then_re_raises() -> None:
+    client = AsyncPenampakan()
+    started = asyncio.Event()
+    gate = asyncio.Event()
+    log: list[str] = []
+    client._singleflight = cast(
+        SingleFlightCoordinator[bytes],
+        RecordingCloser("singleflight", log, started=started, gate=gate),
+    )
+    client._router = cast(BackendRouter, RecordingCloser("router", log))
+    client._cache = cast(Cache, RecordingCloser("cache", log))
+    closer = asyncio.create_task(client.aclose())
+    await asyncio.wait_for(started.wait(), timeout=1.0)
+    closer.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert not closer.done()
+    assert client.closed is False
+
+    gate.set()
+    with pytest.raises(asyncio.CancelledError):
+        await closer
+
+    assert log == ["singleflight", "router", "cache"]
+    assert client.closed is True
+
+
+class UnhashableBackend:
+    """A backend that is unhashable and equal to everything."""
+
+    __hash__ = None  # type: ignore[assignment]
+
+    def __init__(self, name: str) -> None:
+        self._descriptor = BackendDescriptor(
+            name=name,
+            version="1.0",
+            capabilities=(CapabilityDescriptor(capability=Capability.CAPTION),),
+        )
+        self.close_calls = 0
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    @property
+    def descriptor(self) -> BackendDescriptor:
+        return self._descriptor
+
+    def supports(self, request: VisionRequest) -> bool:
+        return request.capability is Capability.CAPTION
+
+    async def analyze(self, image: BackendImage, request: VisionRequest) -> VisionResult:
+        raise AssertionError
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+
+
+class SlottedBackend:
+    """A backend whose layout offers no weak-reference support."""
+
+    __slots__ = ("_descriptor", "close_calls")
+
+    def __init__(self, name: str) -> None:
+        self._descriptor = BackendDescriptor(
+            name=name,
+            version="1.0",
+            capabilities=(CapabilityDescriptor(capability=Capability.CAPTION),),
+        )
+        self.close_calls = 0
+
+    @property
+    def descriptor(self) -> BackendDescriptor:
+        return self._descriptor
+
+    def supports(self, request: VisionRequest) -> bool:
+        return request.capability is Capability.CAPTION
+
+    async def analyze(self, image: BackendImage, request: VisionRequest) -> VisionResult:
+        raise AssertionError
+
+    async def aclose(self) -> None:
+        self.close_calls += 1
+
+
+async def test_ownership_uses_identity_not_equality_or_hashing() -> None:
+    first_backend = UnhashableBackend("example.unhashable_first")
+    second_backend = UnhashableBackend("example.unhashable_second")
+    client = AsyncPenampakan(backends=(first_backend, second_backend))
+
+    with pytest.raises(ConfigurationError) as duplicate:
+        AsyncPenampakan(backends=(first_backend, first_backend))
+    with pytest.raises(ConfigurationError) as shared:
+        AsyncPenampakan(backends=(second_backend,))
+
+    assert duplicate.value.code == "duplicate_backend_instance"
+    assert shared.value.code == "backend_already_owned"
+
+    await client.aclose()
+
+    assert first_backend.close_calls == 1
+    assert second_backend.close_calls == 1
+    assert id(first_backend) not in client_module._BACKEND_OWNERS
+    assert id(second_backend) not in client_module._BACKEND_OWNERS
+
+
+async def test_backend_without_weak_reference_support_is_accepted() -> None:
+    backend = SlottedBackend("example.slotted")
+    first = AsyncPenampakan(backends=(backend,))
+    # The cross-client convenience guard needs a weak reference, so it is
+    # skipped rather than rejecting an otherwise valid backend.
+    second = AsyncPenampakan(backends=(backend,))
+
+    with pytest.raises(ConfigurationError) as duplicate:
+        AsyncPenampakan(backends=(backend, backend))
+
+    assert duplicate.value.code == "duplicate_backend_instance"
+    assert id(backend) not in client_module._BACKEND_OWNERS
+
+    await asyncio.gather(first.aclose(), second.aclose())
+
+    assert backend.close_calls == 2
+
+
+async def test_owner_collected_without_close_releases_the_claim() -> None:
+    backend = RecordingBackend("example.collected_owner")
+    abandoned = AsyncPenampakan(backends=(backend,))
+    key = id(backend)
+
+    assert client_module._BACKEND_OWNERS[key].owner_ref() is abandoned
+
+    del abandoned
+    gc.collect()
+    successor = AsyncPenampakan(backends=(backend,))
+
+    assert client_module._BACKEND_OWNERS[key].owner_ref() is successor
+
+    await successor.aclose()
+
+    assert key not in client_module._BACKEND_OWNERS
+    assert backend.close_calls == 1
+
+
+async def test_stale_address_entry_never_rejects_an_unrelated_backend() -> None:
+    owner = AsyncPenampakan()
+    backend = RecordingBackend("example.address_reuse")
+    unrelated = RecordingBackend("example.address_previous")
+    key = id(backend)
+    stale_token = object()
+    client_module._BACKEND_OWNERS[key] = client_module._OwnershipEntry(
+        backend_ref=weakref.ref(unrelated),
+        owner_ref=weakref.ref(owner),
+        token=stale_token,
+    )
+    try:
+        client = AsyncPenampakan(backends=(backend,))
+        entry = client_module._BACKEND_OWNERS[key]
+
+        assert entry.backend_ref() is backend
+        assert entry.token is not stale_token
+
+        await client.aclose()
+
+        assert key not in client_module._BACKEND_OWNERS
+    finally:
+        client_module._BACKEND_OWNERS.pop(key, None)
+        await owner.aclose()
+
+
+async def test_stale_weakref_callback_never_evicts_a_newer_owner() -> None:
+    backend = RecordingBackend("example.token_race")
+    client = AsyncPenampakan(backends=(backend,))
+    key = id(backend)
+    entry = client_module._BACKEND_OWNERS[key]
+
+    client_module._forget_backend(key, object(), None)
+
+    assert client_module._BACKEND_OWNERS[key] is entry
+
+    client_module._forget_backend(key, entry.token, None)
+
+    assert key not in client_module._BACKEND_OWNERS
+
+    await client.aclose()
+
+    assert backend.close_calls == 1
+
+
+async def test_close_warnings_carry_only_redacted_library_details() -> None:
+    class SecretError(Exception):
+        code = "s3cr3t-connection-string"
+
+    client = AsyncPenampakan()
+    _instrument_close(
+        client,
+        {
+            "router": SecretError("secret close sentinel"),
+            "cache": BackendError(code="backend_close_failed"),
+        },
+    )
+
+    await client.aclose()
+
+    warnings = client.close_warnings
+    assert [warning.details["resource"] for warning in warnings] == ["router", "cache"]
+    assert "error_code" not in warnings[0].details
+    assert warnings[0].details["error_type"] == "SecretError"
+    assert warnings[1].details["error_code"] == "backend_close_failed"
+    assert all("secret" not in warning.model_dump_json() for warning in warnings)

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import sys
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from io import BytesIO
-from types import SimpleNamespace
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
 from typing import cast
 
 import pytest
@@ -28,6 +30,9 @@ from penampakan.models import (
     ImageAsset,
     MetadataRequest,
 )
+
+_CAPTION_COMMIT = "a1b2c3d4" * 5
+_DETECTION_COMMIT = "0f1e2d3c" * 5
 
 
 def _backend_image(width: int = 100, height: int = 80) -> BackendImage:
@@ -115,14 +120,14 @@ def test_construction_and_discovery_are_lazy_and_descriptors_are_exact(
 
     caption = TransformersCaptionBackend(
         "org/caption",
-        revision="caption-commit",
+        revision=_CAPTION_COMMIT,
         device="cpu",
         local_files_only=True,
         generation_kwargs={"num_beams": 2},
     )
     detection = TransformersDetectionBackend(
         "org/detection",
-        revision="detection-commit",
+        revision=_DETECTION_COMMIT,
         device=-1,
         local_files_only=True,
     )
@@ -130,14 +135,16 @@ def test_construction_and_discovery_are_lazy_and_descriptors_are_exact(
     assert imports == []
     assert caption.descriptor.name == "transformers.caption"
     assert caption.descriptor.model_id == "org/caption"
-    assert caption.descriptor.model_revision == "caption-commit"
+    assert caption.descriptor.model_revision == _CAPTION_COMMIT
+    assert caption.descriptor.durable_cache_eligible
     assert caption.descriptor.capabilities[0].capability is Capability.CAPTION
     assert caption.supports(CaptionRequest())
     assert not caption.supports(CaptionRequest(focus="question"))
     assert not caption.supports(MetadataRequest())
     assert detection.descriptor.name == "transformers.detection"
     assert detection.descriptor.model_id == "org/detection"
-    assert detection.descriptor.model_revision == "detection-commit"
+    assert detection.descriptor.model_revision == _DETECTION_COMMIT
+    assert detection.descriptor.durable_cache_eligible
     assert detection.descriptor.capabilities[0].features == frozenset({"detect.open_vocabulary"})
     assert detection.supports(DetectionRequest(labels=("cat",)))
     assert not detection.supports(DetectionRequest())
@@ -152,7 +159,7 @@ async def test_caption_loads_once_with_secure_pinned_local_configuration(
     imports = _install(monkeypatch, runtime)
     backend = TransformersCaptionBackend(
         "org/caption",
-        revision="abc123",
+        revision=_CAPTION_COMMIT,
         device="cpu",
         local_files_only=True,
         generation_kwargs={"num_beams": 3, "do_sample": False},
@@ -164,13 +171,14 @@ async def test_caption_loads_once_with_secure_pinned_local_configuration(
     )
 
     assert first == second
+    assert first.warnings == ()
     assert imports == ["transformers", "torch"]
     assert runtime.pipeline_calls == [
         (
             "image-to-text",
             {
                 "model": "org/caption",
-                "revision": "abc123",
+                "revision": _CAPTION_COMMIT,
                 "device": "cpu",
                 "trust_remote_code": False,
                 "model_kwargs": {"local_files_only": True},
@@ -195,7 +203,7 @@ async def test_caption_crops_normalizes_and_truncates_at_sentence_boundary(
     )
     runtime = FakeRuntime(pipeline)
     _install(monkeypatch, runtime)
-    backend = TransformersCaptionBackend(revision="pinned")
+    backend = TransformersCaptionBackend(revision=_CAPTION_COMMIT)
     region = Box(x_min=0.25, y_min=0.25, x_max=0.75, y_max=0.75)
 
     result = await backend.analyze(
@@ -211,7 +219,7 @@ async def test_caption_crops_normalizes_and_truncates_at_sentence_boundary(
 
 
 @pytest.mark.asyncio
-async def test_caption_reports_unpinned_revision_and_empty_generation(
+async def test_caption_reports_unresolved_revision_and_empty_generation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pipeline = FakePipeline([{"generated_text": " \x00 "}, {"unexpected": "value"}])
@@ -221,22 +229,218 @@ async def test_caption_reports_unpinned_revision_and_empty_generation(
 
     result = await backend.analyze(_backend_image(), CaptionRequest())
 
+    assert backend.descriptor.model_revision is None
+    assert not backend.descriptor.durable_cache_eligible
     assert result.observations == ()
     assert tuple(item.code for item in result.warnings) == (
-        "unversioned_model_revision",
+        "unresolved_model_revision",
         "no_caption_generated",
     )
+
+
+@pytest.mark.asyncio
+async def test_mutable_revision_is_unresolved_but_still_reaches_the_loader(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = FakePipeline([{"generated_text": "A red square."}])
+    runtime = FakeRuntime(pipeline)
+    _install(monkeypatch, runtime)
+    backend = TransformersCaptionBackend("org/caption", revision="main")
+
+    result = await backend.analyze(_backend_image(), CaptionRequest())
+
+    assert runtime.pipeline_calls[0][1]["revision"] == "main"
+    assert backend.descriptor.model_revision is None
+    assert not backend.descriptor.durable_cache_eligible
+    assert tuple(item.code for item in result.warnings) == ("unresolved_model_revision",)
+    assert backend.descriptor == backend.descriptor
+
+
+@pytest.mark.asyncio
+async def test_detection_reports_unresolved_revision_on_every_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pipeline = FakePipeline(
+        [
+            {
+                "label": "cat",
+                "score": 0.9,
+                "box": {"xmin": 10, "ymin": 10, "xmax": 50, "ymax": 50},
+            }
+        ]
+    )
+    runtime = FakeRuntime(pipeline)
+    _install(monkeypatch, runtime)
+    backend = TransformersDetectionBackend("org/detection", revision="v1.0")
+
+    populated = await backend.analyze(
+        _backend_image(),
+        DetectionRequest(labels=("cat",)),
+    )
+    empty = await backend.analyze(
+        _backend_image(),
+        DetectionRequest(labels=("dog",)),
+    )
+
+    assert runtime.pipeline_calls[0][1]["revision"] == "v1.0"
+    assert len(populated.observations) == 1
+    assert tuple(item.code for item in populated.warnings) == ("unresolved_model_revision",)
+    assert empty.observations == ()
+    assert tuple(item.code for item in empty.warnings) == (
+        "unresolved_model_revision",
+        "unmatched_detection_label",
+    )
+
+
+def test_hub_cache_metadata_resolves_the_weight_snapshot_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lookups: list[tuple[str, str, str]] = []
+    snapshot = (
+        f"/home/user/.cache/huggingface/hub/models--org--caption/snapshots/"
+        f"{_CAPTION_COMMIT}/model.safetensors"
+    )
+
+    def try_to_load_from_cache(*, repo_id: str, filename: str, revision: str) -> object:
+        lookups.append((repo_id, filename, revision))
+        if filename != "model.safetensors":
+            return None
+        return snapshot
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        cast(
+            ModuleType,
+            SimpleNamespace(try_to_load_from_cache=try_to_load_from_cache),
+        ),
+    )
+
+    backend = TransformersCaptionBackend(
+        "org/caption",
+        revision="main",
+        local_files_only=True,
+    )
+
+    assert lookups == [("org/caption", "model.safetensors", "main")]
+    assert backend.descriptor.model_revision == _CAPTION_COMMIT
+    assert backend.descriptor.durable_cache_eligible
+
+
+def test_hub_cache_binary_weights_resolve_and_config_paths_do_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prefix = "/cache/models--org--detection/snapshots"
+
+    def binary_weights(*, repo_id: str, filename: str, revision: str) -> object:
+        if filename == "pytorch_model.bin":
+            return Path(f"{prefix}/{_DETECTION_COMMIT}/pytorch_model.bin")
+        return None
+
+    def config_only(*, repo_id: str, filename: str, revision: str) -> object:
+        if filename == "config.json":
+            return f"{prefix}/{_DETECTION_COMMIT}/config.json"
+        return None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        cast(ModuleType, SimpleNamespace(try_to_load_from_cache=binary_weights)),
+    )
+    resolved = TransformersDetectionBackend("org/detection", local_files_only=True)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        cast(ModuleType, SimpleNamespace(try_to_load_from_cache=config_only)),
+    )
+    unresolved = TransformersDetectionBackend("org/detection", local_files_only=True)
+
+    assert resolved.descriptor.model_revision == _DETECTION_COMMIT
+    assert unresolved.descriptor.model_revision is None
+    assert not unresolved.descriptor.durable_cache_eligible
+
+
+@pytest.mark.parametrize(
+    "located",
+    [
+        None,
+        object(),
+        b"/cache/models--org--caption/snapshots/" + b"a" * 40 + b"/model.safetensors",
+        "/cache/models--org--caption/snapshots/not-a-commit/model.safetensors",
+        "/cache/models--org--caption/blobs/" + "a" * 40,
+    ],
+)
+def test_unusable_hub_cache_results_stay_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+    located: object,
+) -> None:
+    def try_to_load_from_cache(*, repo_id: str, filename: str, revision: str) -> object:
+        return located
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        cast(ModuleType, SimpleNamespace(try_to_load_from_cache=try_to_load_from_cache)),
+    )
+
+    backend = TransformersCaptionBackend("org/caption", local_files_only=True)
+
+    assert backend.descriptor.model_revision is None
+
+
+def test_hub_lookup_failures_do_not_break_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def exploding(*, repo_id: str, filename: str, revision: str) -> object:
+        raise OSError("cache directory is unreadable")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        cast(ModuleType, SimpleNamespace(try_to_load_from_cache=exploding)),
+    )
+    exploding_backend = TransformersCaptionBackend("org/caption", local_files_only=True)
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        cast(ModuleType, SimpleNamespace()),
+    )
+    incompatible_backend = TransformersCaptionBackend("org/caption", local_files_only=True)
+
+    assert exploding_backend.descriptor.model_revision is None
+    assert incompatible_backend.descriptor.model_revision is None
+
+
+def test_resolved_revision_survives_hub_changes_after_construction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = f"/cache/models--org--caption/snapshots/{_CAPTION_COMMIT}/model.safetensors"
+
+    def try_to_load_from_cache(*, repo_id: str, filename: str, revision: str) -> object:
+        return snapshot if filename == "model.safetensors" else None
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        cast(ModuleType, SimpleNamespace(try_to_load_from_cache=try_to_load_from_cache)),
+    )
+    backend = TransformersCaptionBackend("org/caption", local_files_only=True)
+    monkeypatch.delitem(sys.modules, "huggingface_hub")
+
+    assert backend.descriptor == backend.descriptor
+    assert backend.descriptor.model_revision == _CAPTION_COMMIT
 
 
 @pytest.mark.asyncio
 async def test_missing_extra_and_model_load_failures_are_cached(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    imports = 0
+    imports: list[str] = []
 
     def missing(name: str) -> object:
-        nonlocal imports
-        imports += 1
+        imports.append(name)
         raise ModuleNotFoundError(name)
 
     monkeypatch.setattr(importlib, "import_module", missing)
@@ -247,7 +451,7 @@ async def test_missing_extra_and_model_load_failures_are_cached(
             await backend.analyze(_backend_image(), CaptionRequest())
         assert raised.value.code == "transformers_extra_missing"
 
-    assert imports == 1
+    assert imports == ["transformers"]
 
     pipeline = FakePipeline([])
     runtime = FakeRuntime(pipeline)
@@ -296,7 +500,7 @@ async def test_detection_maps_labels_clamps_region_filters_and_warns(
     )
     runtime = FakeRuntime(pipeline)
     _install(monkeypatch, runtime)
-    backend = TransformersDetectionBackend(revision="pinned")
+    backend = TransformersDetectionBackend(revision=_DETECTION_COMMIT)
     region = Box(x_min=0.25, y_min=0.25, x_max=0.75, y_max=0.75)
 
     result = await backend.analyze(
@@ -352,7 +556,7 @@ async def test_detection_nms_sorting_and_result_cap_are_deterministic(
     )
     runtime = FakeRuntime(pipeline)
     _install(monkeypatch, runtime)
-    backend = TransformersDetectionBackend(revision="pinned")
+    backend = TransformersDetectionBackend(revision=_DETECTION_COMMIT)
 
     result = await backend.analyze(
         _backend_image(100, 100),
@@ -382,7 +586,7 @@ async def test_detection_discards_zero_area_boxes_with_warning(
     )
     runtime = FakeRuntime(pipeline)
     _install(monkeypatch, runtime)
-    backend = TransformersDetectionBackend(revision="pinned")
+    backend = TransformersDetectionBackend(revision=_DETECTION_COMMIT)
 
     result = await backend.analyze(
         _backend_image(),
@@ -410,7 +614,7 @@ async def test_cancellation_finishes_worker_and_close_releases_pipeline_once(
     pipeline = BlockingPipeline([{"generated_text": "Finished."}])
     runtime = FakeRuntime(pipeline)
     _install(monkeypatch, runtime)
-    backend = TransformersCaptionBackend(revision="pinned")
+    backend = TransformersCaptionBackend(revision=_CAPTION_COMMIT)
     task = asyncio.create_task(backend.analyze(_backend_image(), CaptionRequest()))
     assert await asyncio.to_thread(started.wait, 1.0)
     task.cancel()
@@ -424,3 +628,33 @@ async def test_cancellation_finishes_worker_and_close_releases_pipeline_once(
     assert pipeline.close_calls == 1
     with pytest.raises(RuntimeError, match="closed"):
         await backend.analyze(_backend_image(), CaptionRequest())
+
+
+def test_hub_cache_snapshot_is_not_trusted_when_the_loader_may_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lookups: list[str] = []
+    snapshot = f"/cache/models--org--caption/snapshots/{_CAPTION_COMMIT}/model.safetensors"
+
+    def try_to_load_from_cache(*, repo_id: str, filename: str, revision: str) -> object:
+        lookups.append(filename)
+        return snapshot
+
+    monkeypatch.setitem(
+        sys.modules,
+        "huggingface_hub",
+        cast(ModuleType, SimpleNamespace(try_to_load_from_cache=try_to_load_from_cache)),
+    )
+    # A mutable reference with downloads enabled may load a newer commit than the
+    # one already cached, so the cached snapshot is never reported as the identity.
+    mutable = TransformersCaptionBackend("org/caption", revision="main")
+    default = TransformersCaptionBackend("org/caption")
+    pinned = TransformersCaptionBackend("org/caption", revision=_CAPTION_COMMIT)
+
+    assert lookups == []
+    assert mutable.descriptor.model_revision is None
+    assert default.descriptor.model_revision is None
+    assert not mutable.descriptor.durable_cache_eligible
+    # An explicit commit is exact without consulting the cache at all.
+    assert pinned.descriptor.model_revision == _CAPTION_COMMIT
+    assert pinned.descriptor.durable_cache_eligible

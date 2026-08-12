@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import importlib
 import math
+import os
 import re
 from collections.abc import Callable, Mapping
 from contextlib import AbstractContextManager, suppress
 from io import BytesIO
+from pathlib import PurePath
 from typing import Protocol, TypeVar, cast
 
 from PIL import Image
@@ -42,6 +44,9 @@ _T = TypeVar("_T")
 _SENTENCE_BOUNDARY = re.compile(r"[.!?]+(?:[\"')\]]*)")
 _LABEL_TRAILING_PUNCTUATION = " \t\r\n.,:;!?"
 _NMS_IOU = 0.8
+_COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
+_SNAPSHOT_DIRECTORY = "snapshots"
+_WEIGHT_FILENAMES = ("model.safetensors", "pytorch_model.bin")
 
 
 class _Pipeline(Protocol):
@@ -107,13 +112,72 @@ def _strict_json_mapping(
     return result
 
 
-def _unversioned_warning(revision: str | None) -> tuple[WarningInfo, ...]:
-    if revision is not None:
+def _snapshot_commit(located: object) -> str | None:
+    if not isinstance(located, (str, os.PathLike)):
+        return None
+    try:
+        path = os.fspath(located)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(path, str) or not path:
+        return None
+    parts = PurePath(path).parts
+    for index in range(len(parts) - 1, 0, -1):
+        candidate = parts[index]
+        if parts[index - 1] == _SNAPSHOT_DIRECTORY and _COMMIT_SHA.fullmatch(candidate):
+            return candidate
+    return None
+
+
+def _resolve_model_revision(
+    model_id: str,
+    revision: str | None,
+    *,
+    local_files_only: bool,
+) -> str | None:
+    """Resolve the immutable weight snapshot commit without contacting the network.
+
+    An explicit commit revision is exact on its own. A mutable reference resolves
+    only through the local Hub cache, and only when the loader is restricted to
+    local files: otherwise the loader may fetch a newer commit for that reference
+    and the cached snapshot would not be the weight identity actually loaded.
+    """
+    if revision is not None and _COMMIT_SHA.fullmatch(revision):
+        return revision
+    if not local_files_only:
+        return None
+    try:
+        hub = importlib.import_module("huggingface_hub")
+    except ImportError:
+        return None
+    lookup = getattr(hub, "try_to_load_from_cache", None)
+    if not callable(lookup):
+        return None
+    for filename in _WEIGHT_FILENAMES:
+        try:
+            located = lookup(
+                repo_id=model_id,
+                filename=filename,
+                revision=revision if revision is not None else "main",
+            )
+        except Exception:
+            continue
+        commit = _snapshot_commit(located)
+        if commit is not None:
+            return commit
+    return None
+
+
+def _unresolved_warning(resolved_revision: str | None) -> tuple[WarningInfo, ...]:
+    if resolved_revision is not None:
         return ()
     return (
         WarningInfo(
-            code="unversioned_model_revision",
-            message="Pin a model commit revision for reproducible inference.",
+            code="unresolved_model_revision",
+            message=(
+                "The exact model weight revision is unresolved; pin an immutable "
+                "commit revision for reproducible inference and durable caching."
+            ),
         ),
     )
 
@@ -205,6 +269,7 @@ class _TransformersBackend:
         self._revision = revision
         self._device = device
         self._local_files_only = local_files_only
+        self._revision_warnings = _unresolved_warning(descriptor.model_revision)
         self._pipeline: _Pipeline | None = None
         self._inference_mode: Callable[[], AbstractContextManager[object]] | None = None
         self._load_error: BackendUnavailableError | None = None
@@ -336,7 +401,11 @@ class TransformersCaptionBackend(_TransformersBackend):
             name="transformers.caption",
             version="caption-v1",
             model_id=selected_model,
-            model_revision=selected_revision,
+            model_revision=_resolve_model_revision(
+                selected_model,
+                selected_revision,
+                local_files_only=local_files_only,
+            ),
             capabilities=(CapabilityDescriptor(capability=Capability.CAPTION),),
             max_concurrency=1,
         )
@@ -375,7 +444,7 @@ class TransformersCaptionBackend(_TransformersBackend):
             if normalized:
                 caption = _truncate_sentences(normalized, request.max_sentences)
                 break
-        warnings = list(_unversioned_warning(self._revision))
+        warnings = list(self._revision_warnings)
         if not caption:
             warnings.append(
                 WarningInfo(
@@ -413,7 +482,11 @@ class TransformersDetectionBackend(_TransformersBackend):
             name="transformers.detection",
             version="detection-v1",
             model_id=selected_model,
-            model_revision=selected_revision,
+            model_revision=_resolve_model_revision(
+                selected_model,
+                selected_revision,
+                local_files_only=local_files_only,
+            ),
             capabilities=(
                 CapabilityDescriptor(
                     capability=Capability.DETECT,
@@ -471,7 +544,7 @@ class TransformersDetectionBackend(_TransformersBackend):
         )
         return VisionResult(
             observations=drafts,
-            warnings=(*_unversioned_warning(self._revision), *warnings),
+            warnings=(*self._revision_warnings, *warnings),
         )
 
     @staticmethod

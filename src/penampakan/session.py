@@ -54,6 +54,7 @@ from penampakan.perception.cache import (
     SingleFlightCoordinator,
     build_perception_cache_key,
     canonical_request_json,
+    is_durable_cache,
 )
 from penampakan.perception.normalize import NormalizationLimits, normalize_backend_result
 from penampakan.perception.registry import ToolRegistry, ToolResult
@@ -1202,7 +1203,9 @@ class AsyncVisionSession:
             preprocessing_version=_PREPROCESSING_VERSION,
         )
         cache_warning: WarningInfo | None = None
-        cached = await self._safe_cache_get(cache_key)
+        durable = is_durable_cache(self._cache)
+        allowed = self._cache_allowed(durable, first)
+        cached = await self._safe_cache_get(cache_key) if allowed else None
         if cached is not None:
             try:
                 result = normalize_backend_result(
@@ -1268,7 +1271,8 @@ class AsyncVisionSession:
                 backend=route_result.descriptor,
                 preprocessing_version=_PREPROCESSING_VERSION,
             )
-            await self._safe_cache_set(actual_key, encoded)
+            if self._cache_allowed(durable, route_result.descriptor):
+                await self._safe_cache_set(actual_key, encoded)
             return encoded
 
         encoded = await self._singleflight.run(cache_key, populate)
@@ -1312,6 +1316,10 @@ class AsyncVisionSession:
             cache_hit=cache_hit,
         )
         return _PerceptionOutcome(asset_id, result, provenance, warnings)
+
+    @staticmethod
+    def _cache_allowed(durable: bool, descriptor: BackendDescriptor) -> bool:
+        return not durable or descriptor.durable_cache_eligible
 
     async def _safe_cache_get(self, key: str) -> bytes | None:
         try:

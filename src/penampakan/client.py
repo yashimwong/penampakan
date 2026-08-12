@@ -5,11 +5,19 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
-from collections.abc import Sequence
+import weakref
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
+from functools import partial
 
 from penampakan.backends.pillow import PillowBackend
 from penampakan.config import Settings, validate_timeout_s
-from penampakan.errors import ConfigurationError, OperationTimeoutError, SessionClosedError
+from penampakan.errors import (
+    ConfigurationError,
+    OperationTimeoutError,
+    PenampakanError,
+    SessionClosedError,
+)
 from penampakan.image.assets import AssetStore
 from penampakan.image.loader import load_image
 from penampakan.models import (
@@ -17,6 +25,7 @@ from penampakan.models import (
     ImageSource,
     InspectionPlan,
     InspectionResult,
+    JsonValue,
     VisionAnswer,
     WarningInfo,
 )
@@ -30,8 +39,45 @@ from penampakan.session import AsyncVisionSession
 from penampakan.tools.builtin import register_transform_tools
 from penampakan.tools.vision import register_vision_tools
 
-_BACKEND_OWNERS_LOCK = threading.Lock()
-_OWNED_BACKEND_IDS: set[int] = set()
+
+@dataclass(slots=True)
+class _OwnershipEntry:
+    """One cross-client claim on a caller-supplied backend instance."""
+
+    backend_ref: weakref.ReferenceType[object]
+    owner_ref: weakref.ReferenceType[AsyncPenampakan]
+    token: object
+
+
+# A reentrant lock keeps a weakref callback that fires while the registry is
+# being mutated on the same thread from deadlocking against itself.
+_BACKEND_OWNERS_LOCK = threading.RLock()
+_BACKEND_OWNERS: dict[int, _OwnershipEntry] = {}
+
+
+def _live_backend_owner(key: int, backend: object) -> AsyncPenampakan | None:
+    """Return the live owner of a backend, discarding stale registry entries."""
+    entry = _BACKEND_OWNERS.get(key)
+    if entry is None:
+        return None
+    if entry.backend_ref() is not backend:
+        # A dead backend, or an unrelated object that reused the address.
+        del _BACKEND_OWNERS[key]
+        return None
+    owner = entry.owner_ref()
+    if owner is None:
+        # The owning client was collected without closing.
+        del _BACKEND_OWNERS[key]
+        return None
+    return owner
+
+
+def _forget_backend(key: int, token: object, _reference: object) -> None:
+    """Drop a claim for a collected backend without evicting a newer owner."""
+    with _BACKEND_OWNERS_LOCK:
+        entry = _BACKEND_OWNERS.get(key)
+        if entry is not None and entry.token is token:
+            del _BACKEND_OWNERS[key]
 
 
 class AsyncPenampakan:
@@ -68,8 +114,9 @@ class AsyncPenampakan:
         self._trace_sinks = self._validate_trace_sinks(trace_sinks)
         self._cache = cache if cache is not None else self._default_cache(self._settings)
         self._validate_cache(self._cache)
+        self._close_warnings: list[WarningInfo] = []
         caller_backends = tuple(backends)
-        self._owned_backend_ids = self._claim_backend_ownership(caller_backends)
+        self._claim_backend_ownership(caller_backends)
         pillow = PillowBackend()
         metadata_preferences = self._settings.backend_preferences.get(Capability.METADATA)
         if metadata_preferences not in {None, (pillow.descriptor.name,)}:
@@ -97,6 +144,7 @@ class AsyncPenampakan:
         self._closing = False
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
+        self._close_failure: BaseException | None = None
 
     @property
     def settings(self) -> Settings:
@@ -107,6 +155,11 @@ class AsyncPenampakan:
     def closed(self) -> bool:
         """Return whether all client-owned resources have closed."""
         return self._closed
+
+    @property
+    def close_warnings(self) -> tuple[WarningInfo, ...]:
+        """Return redacted warnings for owned resources that failed to close."""
+        return tuple(self._close_warnings)
 
     async def open_image(self, source: ImageSource) -> AsyncVisionSession:
         """Normalize an image and return a reusable isolated session."""
@@ -187,7 +240,26 @@ class AsyncPenampakan:
                 self._closing = True
                 self._close_task = asyncio.create_task(self._close_owned())
             close_task = self._close_task
-        await asyncio.shield(close_task)
+        try:
+            await asyncio.shield(close_task)
+        except asyncio.CancelledError:
+            if not close_task.done():
+                # The caller was cancelled: let the protected cleanup finish
+                # before the caller's own cancellation resumes.
+                await self._drain_close(close_task)
+            raise
+        if self._close_failure is not None:
+            raise self._close_failure
+
+    @staticmethod
+    async def _drain_close(close_task: asyncio.Task[None]) -> None:
+        while not close_task.done():
+            try:
+                await asyncio.shield(close_task)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
 
     async def __aenter__(self) -> AsyncPenampakan:
         """Enter the reusable asynchronous client context."""
@@ -293,32 +365,94 @@ class AsyncPenampakan:
             await task
             raise
 
+    def _close_sequence(self) -> tuple[tuple[str, Callable[[], Awaitable[object]]], ...]:
+        """Return owned close steps in dependency order.
+
+        Active operations drain first so no session is closed underneath a
+        caller. Sessions close before the resources they borrow. Single flight
+        stops sharing populations before the router closes the backends those
+        populations invoke, the cache closes after the sessions and populations
+        that write to it, and trace sinks close last so every earlier step can
+        still be observed. Caller-owned resources, including a caller-supplied
+        language model or action policy, are never part of this sequence.
+        """
+        return (
+            ("active_operations", self._idle.wait),
+            ("session", self._close_sessions),
+            ("singleflight", self._singleflight.aclose),
+            ("router", self._router.aclose),
+            ("cache", self._cache.aclose),
+            *((f"trace_sink_{index}", sink.aclose) for index, sink in enumerate(self._trace_sinks)),
+        )
+
     async def _close_owned(self) -> None:
+        """Attempt every owned resource once and retain the first base exception.
+
+        The retained base exception is stored rather than raised out of this
+        task. A task that raises ``KeyboardInterrupt`` or ``SystemExit`` hands
+        it to the event loop instead of to the awaiting caller, which would
+        replace the primary exception with an unrelated ``CancelledError``.
+        ``aclose`` re-raises the stored failure so every caller observes it.
+        See ``specs/adr/0002-close-failure-propagation.md``.
+        """
+        primary: BaseException | None = None
         try:
-            await self._idle.wait()
-            sessions = tuple(self._sessions)
-            if sessions:
-                await asyncio.gather(
-                    *(session.aclose() for session in sessions),
-                    return_exceptions=True,
-                )
-            for close in (
-                self._singleflight.aclose,
-                self._router.aclose,
-                self._cache.aclose,
-            ):
+            for resource, close in self._close_sequence():
                 try:
                     await close()
-                except BaseException:
-                    continue
-            for sink in self._trace_sinks:
-                try:
-                    await sink.aclose()
-                except BaseException:
-                    continue
+                except Exception as error:
+                    # An ordinary failure never displaces a primary base
+                    # exception and never stops the remaining cleanup.
+                    self._record_close_warning(resource, error)
+                except BaseException as error:
+                    if primary is None:
+                        primary = error
         finally:
+            self._close_failure = primary
             self._release_backend_ownership()
             self._closed = True
+
+    async def _close_sessions(self) -> None:
+        sessions = tuple(self._sessions)
+        if not sessions:
+            return
+        results = await asyncio.gather(*(self._close_one_session(session) for session in sessions))
+        primary: BaseException | None = None
+        for error in results:
+            if error is None:
+                continue
+            if isinstance(error, Exception):
+                self._record_close_warning("session", error)
+            elif primary is None:
+                primary = error
+        if primary is not None:
+            raise primary
+
+    @staticmethod
+    async def _close_one_session(session: AsyncVisionSession) -> BaseException | None:
+        # Returning the failure keeps a base exception inside this task instead
+        # of letting it abandon the remaining concurrent session closes.
+        try:
+            await session.aclose()
+        except BaseException as error:
+            return error
+        return None
+
+    def _record_close_warning(self, resource: str, error: Exception) -> None:
+        details: dict[str, JsonValue] = {
+            "resource": resource,
+            "error_type": type(error).__name__,
+        }
+        # Only a library error code is known to be a safe stable identifier.
+        if isinstance(error, PenampakanError):
+            details["error_code"] = error.code
+        self._close_warnings.append(
+            WarningInfo(
+                code="owned_resource_close_failed",
+                message="An owned resource failed to close during shutdown.",
+                details=details,
+            )
+        )
 
     @staticmethod
     def _build_tools(router: BackendRouter) -> ToolRegistry:
@@ -377,22 +511,46 @@ class AsyncPenampakan:
             raise OperationTimeoutError()
         return remaining
 
-    @staticmethod
-    def _claim_backend_ownership(backends: Sequence[VisionBackend]) -> set[int]:
-        identifiers = [id(backend) for backend in backends]
-        if len(identifiers) != len(set(identifiers)):
-            raise ConfigurationError(code="duplicate_backend_instance")
+    def _claim_backend_ownership(self, backends: Sequence[VisionBackend]) -> None:
+        selected: list[object] = []
+        for backend in backends:
+            # Identity comparison keeps duplicate detection independent of the
+            # backend's hashing and equality behavior.
+            if any(backend is existing for existing in selected):
+                raise ConfigurationError(code="duplicate_backend_instance")
+            selected.append(backend)
+        claims: list[tuple[int, object]] = []
         with _BACKEND_OWNERS_LOCK:
-            if any(identifier in _OWNED_BACKEND_IDS for identifier in identifiers):
-                raise ConfigurationError(code="backend_already_owned")
-            _OWNED_BACKEND_IDS.update(identifiers)
-        return set(identifiers)
+            for candidate in selected:
+                if _live_backend_owner(id(candidate), candidate) is not None:
+                    raise ConfigurationError(code="backend_already_owned")
+            for candidate in selected:
+                key = id(candidate)
+                token = object()
+                try:
+                    reference = weakref.ref(candidate, partial(_forget_backend, key, token))
+                except TypeError:
+                    # A backend without weak-reference support keeps local
+                    # duplicate detection but skips the cross-client guard.
+                    continue
+                _BACKEND_OWNERS[key] = _OwnershipEntry(
+                    backend_ref=reference,
+                    owner_ref=weakref.ref(self),
+                    token=token,
+                )
+                claims.append((key, token))
+        self._ownership_claims: tuple[tuple[int, object], ...] = tuple(claims)
 
     def _release_backend_ownership(self) -> None:
-        identifiers: set[int] = getattr(self, "_owned_backend_ids", set())
+        claims: tuple[tuple[int, object], ...] = getattr(self, "_ownership_claims", ())
+        if not claims:
+            return
         with _BACKEND_OWNERS_LOCK:
-            _OWNED_BACKEND_IDS.difference_update(identifiers)
-        identifiers.clear()
+            for key, token in claims:
+                entry = _BACKEND_OWNERS.get(key)
+                if entry is not None and entry.token is token:
+                    del _BACKEND_OWNERS[key]
+        self._ownership_claims = ()
 
 
 __all__ = ["AsyncPenampakan"]

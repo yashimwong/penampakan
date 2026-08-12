@@ -24,6 +24,7 @@ from penampakan.models import (
     VisionRequest,
     VisionResult,
 )
+from penampakan.perception.cache import is_durable_cache
 from penampakan.protocols import ActionPolicy, Cache, TextLLM, TraceSink, VisionBackend
 
 
@@ -238,6 +239,7 @@ async def test_cache_uses_bytes_and_keyword_only_accounted_size() -> None:
     assert cache.values == {"cache-key": b"value"}
     assert cache.sizes == {"cache-key": 5}
     assert cache.close_count == 1
+    assert is_durable_cache(cache) is False
 
 
 async def test_trace_sink_receives_typed_redacted_event() -> None:

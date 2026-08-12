@@ -1,9 +1,14 @@
 import asyncio
+import functools
 import threading
+from collections.abc import Awaitable, Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import contextmanager
 
+import pytest
 from PIL import Image
 
-from penampakan.backends.callable import CallableVisionBackend
+from penampakan.backends.callable import AnalyzeCallable, CallableVisionBackend, CloseCallable
 from penampakan.image.assets import AssetStore
 from penampakan.models import (
     BackendDescriptor,
@@ -37,6 +42,46 @@ def result() -> VisionResult:
     return VisionResult(
         observations=(ObservationDraft(payload=CaptionPayload(text="A red square.")),)
     )
+
+
+class RecordingExecutor(ThreadPoolExecutor):
+    def __init__(self) -> None:
+        super().__init__(max_workers=2)
+        self.submissions = 0
+
+    def submit(  # type: ignore[override]
+        self,
+        fn: Callable[..., object],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> Future[object]:
+        self.submissions += 1
+        return super().submit(fn, *args, **kwargs)
+
+
+@contextmanager
+def recording_executor() -> Iterator[RecordingExecutor]:
+    """Install a default executor that counts every offloaded callable."""
+
+    loop = asyncio.get_event_loop()
+    executor = RecordingExecutor()
+    loop.set_default_executor(executor)
+    try:
+        yield executor
+    finally:
+        executor.shutdown(wait=False)
+
+
+@contextmanager
+def opened_store() -> Iterator[AssetStore]:
+    source = Image.new("RGB", (2, 2), "red")
+    store = AssetStore.create(source)
+    try:
+        yield store
+    finally:
+        store.close()
+        source.close()
 
 
 async def test_sync_analyzer_runs_in_worker_thread() -> None:
@@ -112,3 +157,175 @@ async def test_close_callable_runs_once_for_concurrent_close() -> None:
     await asyncio.gather(backend.aclose(), backend.aclose(), backend.aclose())
 
     assert close_calls == 1
+
+
+@pytest.mark.parametrize("shape", ["coroutine_function", "partial", "async_call_object"])
+async def test_async_analyzers_run_on_the_loop_thread(shape: str) -> None:
+    loop_thread = threading.get_ident()
+    analyzer_threads: list[int] = []
+
+    async def analyze(image: object, request: object) -> VisionResult:
+        analyzer_threads.append(threading.get_ident())
+        await asyncio.sleep(0)
+        return result()
+
+    class AsyncAnalyzer:
+        async def __call__(self, image: object, request: object) -> VisionResult:
+            analyzer_threads.append(threading.get_ident())
+            await asyncio.sleep(0)
+            return result()
+
+    analyzers: dict[str, AnalyzeCallable] = {
+        "coroutine_function": analyze,
+        "partial": functools.partial(analyze),
+        "async_call_object": AsyncAnalyzer(),
+    }
+
+    with opened_store() as store, recording_executor() as executor:
+        backend = CallableVisionBackend(descriptor(), analyzers[shape])
+
+        response = await backend.analyze(store.backend_image(store.root_id), CaptionRequest())
+
+        assert response == result()
+        assert analyzer_threads == [loop_thread]
+        assert executor.submissions == 0
+        await backend.aclose()
+
+
+async def test_sync_analyzer_returning_awaitable_awaits_on_the_loop_thread() -> None:
+    loop_thread = threading.get_ident()
+    observed: dict[str, int] = {}
+
+    def analyze(image: object, request: object) -> Awaitable[VisionResult]:
+        observed["call"] = threading.get_ident()
+
+        async def finish() -> VisionResult:
+            observed["await"] = threading.get_ident()
+            return result()
+
+        return finish()
+
+    with opened_store() as store, recording_executor() as executor:
+        backend = CallableVisionBackend(descriptor(), analyze)
+
+        response = await backend.analyze(store.backend_image(store.root_id), CaptionRequest())
+
+        assert response == result()
+        assert observed["call"] != loop_thread
+        assert observed["await"] == loop_thread
+        assert executor.submissions == 1
+        await backend.aclose()
+
+
+@pytest.mark.parametrize("shape", ["coroutine_function", "partial", "async_call_object"])
+async def test_async_close_callables_run_on_the_loop_thread(shape: str) -> None:
+    loop_thread = threading.get_ident()
+    close_threads: list[int] = []
+
+    async def close() -> None:
+        close_threads.append(threading.get_ident())
+        await asyncio.sleep(0)
+
+    class AsyncCloser:
+        async def __call__(self) -> None:
+            close_threads.append(threading.get_ident())
+            await asyncio.sleep(0)
+
+    closers: dict[str, CloseCallable] = {
+        "coroutine_function": close,
+        "partial": functools.partial(close),
+        "async_call_object": AsyncCloser(),
+    }
+    backend = CallableVisionBackend(
+        descriptor(),
+        lambda image, request: result(),
+        close=closers[shape],
+    )
+
+    with recording_executor() as executor:
+        await backend.aclose()
+
+    assert close_threads == [loop_thread]
+    assert executor.submissions == 0
+
+
+async def test_sync_close_callable_runs_in_worker_thread() -> None:
+    loop_thread = threading.get_ident()
+    close_threads: list[int] = []
+
+    def close() -> None:
+        close_threads.append(threading.get_ident())
+
+    backend = CallableVisionBackend(descriptor(), lambda image, request: result(), close=close)
+
+    await backend.aclose()
+
+    assert close_threads and close_threads[0] != loop_thread
+
+
+async def test_sync_close_callable_returning_awaitable_awaits_on_the_loop_thread() -> None:
+    loop_thread = threading.get_ident()
+    observed: dict[str, int] = {}
+
+    def close() -> Awaitable[None]:
+        observed["call"] = threading.get_ident()
+
+        async def finish() -> None:
+            observed["await"] = threading.get_ident()
+
+        return finish()
+
+    backend = CallableVisionBackend(descriptor(), lambda image, request: result(), close=close)
+
+    with recording_executor() as executor:
+        await backend.aclose()
+
+    assert observed["call"] != loop_thread
+    assert observed["await"] == loop_thread
+    assert executor.submissions == 1
+
+
+async def test_cancelling_async_analyze_propagates_cancellation() -> None:
+    started = asyncio.Event()
+
+    async def analyze(image: object, request: object) -> VisionResult:
+        started.set()
+        await asyncio.sleep(30)
+        return result()
+
+    with opened_store() as store:
+        backend = CallableVisionBackend(descriptor(), analyze)
+        task = asyncio.create_task(
+            backend.analyze(store.backend_image(store.root_id), CaptionRequest())
+        )
+
+        await started.wait()
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+async def test_cancelling_threaded_analyze_propagates_cancellation() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def analyze(image: object, request: object) -> VisionResult:
+        started.set()
+        release.wait(30)
+        return result()
+
+    with opened_store() as store:
+        backend = CallableVisionBackend(descriptor(), analyze)
+        task = asyncio.create_task(
+            backend.analyze(store.backend_image(store.root_id), CaptionRequest())
+        )
+        try:
+            while not started.is_set():
+                await asyncio.sleep(0.01)
+            task.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()

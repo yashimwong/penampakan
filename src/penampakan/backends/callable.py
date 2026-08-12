@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from collections.abc import Awaitable, Callable
 
+from penampakan._callables import call_async_or_thread
 from penampakan.models import (
     BackendDescriptor,
     BackendImage,
@@ -83,9 +83,7 @@ class CallableVisionBackend:
             raise RuntimeError("backend is closed")
         if not self.supports(request):
             raise ValueError("request is unsupported")
-        result = await asyncio.to_thread(self._analyze, image, request)
-        if inspect.isawaitable(result):
-            result = await result
+        result = await call_async_or_thread(self._analyze, image, request)
         return VisionResult.model_validate(result, strict=True)
 
     async def aclose(self) -> None:
@@ -98,9 +96,7 @@ class CallableVisionBackend:
     async def _run_close(self) -> None:
         if self._close is None:
             return
-        result = await asyncio.to_thread(self._close)
-        if inspect.isawaitable(result):
-            await result
+        await call_async_or_thread(self._close)
 
 
 __all__ = ["AnalyzeCallable", "CallableVisionBackend", "CloseCallable", "SupportsCallable"]

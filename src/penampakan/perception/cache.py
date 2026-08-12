@@ -9,7 +9,7 @@ from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Generic, TypeVar
+from typing import ClassVar, Generic, TypeVar
 
 from ..models import JSON_VALUE_ADAPTER, BackendDescriptor, VisionRequest
 
@@ -63,10 +63,18 @@ def build_perception_cache_key(
     return hashlib.sha256(canonical).hexdigest()
 
 
+def is_durable_cache(cache: object) -> bool:
+    """Return whether a cache claims retention beyond the current process generation."""
+
+    return getattr(cache, "durable", False) is True
+
+
 class NullCache:
     """A disabled cache implementation that never retains values."""
 
     __slots__ = ("_closed",)
+
+    durable: ClassVar[bool] = False
 
     def __init__(self) -> None:
         self._closed = False
@@ -113,6 +121,8 @@ class MemoryLRUCache:
         "_max_entries",
         "_total_bytes",
     )
+
+    durable: ClassVar[bool] = False
 
     def __init__(
         self,
@@ -361,4 +371,5 @@ __all__ = [
     "SingleFlightCoordinator",
     "build_perception_cache_key",
     "canonical_request_json",
+    "is_durable_cache",
 ]
