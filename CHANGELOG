@@ -1,11 +1,5 @@
-Penampakan 0.1.0
-Released 2026-08-10
-
-Initial release of bounded visual tool orchestration for text-only language
-models. It includes strict public contracts, safe image normalization,
-deterministic perception routing, evidence-grounded question answering,
-reusable asynchronous and synchronous sessions, optional local model adapters,
-redacted tracing, and experimental evaluation metrics.
+Penampakan 0.2.0
+Released 2026-08-16
 
 Metadata inspection now reuses the loader's canonical image, uses balanced PNG
 compression, and reports reusable-session latency plus executed normalization
@@ -44,3 +38,85 @@ session wall time to the asset-lineage and context scans. Those scans cost
 deferred with a documented budget of 1.0 ms per session and 0.15 ms per
 reasoning step, recorded in ADR 0001. The store-owned root lookup that
 multi-image sessions require for correctness is unaffected.
+
+Provider adapters now compile the provider-neutral action schema into a named,
+versioned provider subset before any request is sent. The new
+penampakan.llms.schema module lowers the root discriminated union into the
+documented nested form only after proving the branches are mutually
+distinguishable by a required const discriminator, closes every reachable
+object, converts previously optional properties into required nullable unions
+for the OpenAI target, resolves local references, enforces the documented depth,
+property, enum, and size limits, verifies a round trip against the original
+schema, and canonicalizes and fingerprints the result. One explicit keyword
+table records every keyword that is preserved, dropped, or rejected per target,
+and an unrecognized keyword fails compilation rather than being weakened
+silently. Values a target cannot express are still enforced locally, because
+every adapter post-validates the parsed action against the original schema even
+after provider strict enforcement.
+
+OpenAITextLLM, AnthropicTextLLM, and LiteLLMTextLLM ship as optional-extra
+adapters. Each class module imports on a base install and raises
+ConfigurationError(code="missing_optional_dependency") only when constructed
+without its extra. OpenAITextLLM uses the OpenAI Responses API with strict
+json_schema output and one centrally tested capability table for instruction
+role and sampling support. AnthropicTextLLM uses native structured JSON output
+when the configured model supports it and one forced strict client tool
+otherwise, sends the system instruction through Anthropic's top-level system
+field, and reports which strict path ran through non-sensitive response
+metadata. LiteLLMTextLLM queries LiteLLM's capability metadata before a request
+instead of probing by provoking errors; without strict schema support it raises
+ConfigurationError(code="strict_schema_unavailable") unless allow_json_only is
+explicitly set, in which case it uses JSON mode, post-validates the original
+schema, and reports schema_enforcement=json_only.
+
+LLMResponse gained provider, request_id, backend_fingerprint, attempts, and
+schema_enforcement, so provider identity, retry counts, and degraded enforcement
+are visible in typed state instead of logs. The new RetryPolicy bounds provider
+attempts with capped exponential backoff and full jitter, and one shared retry
+implementation retries only connection failures, timeouts, 429, and 5xx. A
+monotonic deadline from LLMRequest.timeout_s covers every attempt, SDK call,
+response read, and backoff, and a retry never begins when its minimum work would
+cross the deadline. Adapters that construct their own SDK client disable that
+client's native retries so provider attempts cannot multiply. LLMError now
+carries a safe attempt count and the last provider status and error code without
+any response content.
+
+Ownership is explicit end to end. An adapter owns its SDK client only when it
+constructed it, unless owns_client says otherwise. JsonActionPolicy gained
+owns_llm and closes only an owned language model, and AsyncPenampakan and
+Penampakan gained owns_policy and owns_llm. Caller-supplied resources default to
+caller-owned, the convenience construction path owns only the policy it builds,
+and an owned policy closes after the sessions that borrow it and before the
+cache, cascading to a language model it owns. Provider adapters and the policy
+are idempotent asynchronous context managers.
+
+A run that used degraded JSON-only enforcement now carries exactly one
+WarningInfo(code="degraded_schema_enforcement"). The warning travels through
+typed policy and response state rather than a log containing request content.
+
+JsonActionPolicy and build_policy_request accept an explicit temperature so a
+caller can target a model whose API only accepts its own sampling default; the
+deterministic default is unchanged.
+
+Every policy call now reports its provider attempt count, token usage, and schema
+enforcement into the run trace, so the trace summary's token counters are
+populated and a retried provider call is visible in budgets and cost reports
+while still consuming one orchestrator language-model reservation. All three
+adapters classify provider failures identically: connection failures, timeouts,
+408, 429, and 5xx are retried, and every other 4xx is terminal.
+
+Provider contract tests now run only in the provider-SDK CI job. Provider-raised
+timeouts remain eligible for retries under a bounded total deadline, invalid
+responses retain their attempt and token metrics when repaired, fractional
+multipleOf constraints use decimal arithmetic, OpenAI retry policies are
+validated during construction, and strict schema compilation preserves root
+descriptions.
+
+Penampakan 0.1.0
+Released 2026-08-10
+
+Initial release of bounded visual tool orchestration for text-only language
+models. It includes strict public contracts, safe image normalization,
+deterministic perception routing, evidence-grounded question answering,
+reusable asynchronous and synchronous sessions, optional local model adapters,
+redacted tracing, and experimental evaluation metrics.

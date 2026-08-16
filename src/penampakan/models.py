@@ -723,6 +723,31 @@ class TokenUsage(_FrozenModel):
     output_tokens: Annotated[int, Field(ge=0)] | None = None
 
 
+class SchemaEnforcement(str, Enum):
+    """How strongly a provider enforced the compiled action schema."""
+
+    STRICT = "strict"
+    JSON_ONLY = "json_only"
+
+
+class RetryPolicy(_FrozenModel):
+    """Bounded provider retry budget with capped exponential backoff.
+
+    The policy is a pure wire contract: it never carries callable state. A
+    deterministic random source is supplied privately by adapter tests.
+    """
+
+    max_attempts: Annotated[int, Field(ge=1, le=6)] = 3
+    base_delay_s: Annotated[float, Field(gt=0), AfterValidator(_finite)] = 0.25
+    max_delay_s: Annotated[float, Field(gt=0), AfterValidator(_finite)] = 4.0
+
+    @model_validator(mode="after")
+    def _validate_delays(self) -> RetryPolicy:
+        if self.max_delay_s < self.base_delay_s:
+            raise ValueError("max_delay_s must be greater than or equal to base_delay_s")
+        return self
+
+
 class LLMRequest(_FrozenModel):
     """A provider-neutral text-only language-model request."""
 
@@ -751,12 +776,22 @@ class LLMRequest(_FrozenModel):
 
 
 class LLMResponse(_FrozenModel):
-    """Provider-neutral textual output from a language model."""
+    """Provider-neutral textual output from a language model.
+
+    Provider-specific metadata that is not represented by a field here MUST NOT
+    be smuggled into logs or exceptions; new metadata requires a contract-schema
+    update.
+    """
 
     text: _RawText
     model_id: _CleanText | None = None
     usage: TokenUsage | None = None
     finish_reason: _CleanText | None = None
+    provider: _CleanText | None = None
+    request_id: _CleanText | None = None
+    backend_fingerprint: _CleanText | None = None
+    attempts: Annotated[int, Field(ge=1)] = 1
+    schema_enforcement: SchemaEnforcement = SchemaEnforcement.STRICT
 
 
 class BackendImage(_FrozenModel):
@@ -943,7 +978,9 @@ __all__ = [
     "PolicyInput",
     "Provenance",
     "RemainingBudget",
+    "RetryPolicy",
     "RunTrace",
+    "SchemaEnforcement",
     "SegmentationPayload",
     "SegmentationRequest",
     "TextPayload",

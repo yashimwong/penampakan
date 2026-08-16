@@ -9,6 +9,9 @@ if TYPE_CHECKING:
 
 
 _ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]*$")
+# Provider identifiers and error codes are only reported when they match this
+# conservative shape, so no provider text can leak through an exception.
+_SAFE_TOKEN = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 
 
 class PenampakanError(Exception):
@@ -195,10 +198,66 @@ class LLMNotConfiguredError(ReasoningError):
 
 
 class LLMError(ReasoningError):
-    """Raised when the configured text language model fails."""
+    """Raised when the configured text language model fails.
+
+    Provider adapters may attach a safe attempt count and the last provider
+    status/error code. No prompt, response, header, or credential content is
+    ever carried.
+    """
 
     default_code = "llm_error"
     default_message = "The configured language model failed."
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        code: str | None = None,
+        trace_id: UUID | None = None,
+        backend_name: str | None = None,
+        tool_name: str | None = None,
+        retryable: bool | None = None,
+        cause: BaseException | None = None,
+        cause_summary: str | None = None,
+        attempts: int | None = None,
+        provider: str | None = None,
+        provider_status: int | None = None,
+        provider_code: str | None = None,
+    ) -> None:
+        self.attempts = attempts if isinstance(attempts, int) and attempts >= 1 else None
+        self.provider = (
+            provider if provider is not None and _SAFE_TOKEN.fullmatch(provider) else None
+        )
+        self.provider_status = (
+            provider_status
+            if isinstance(provider_status, int) and 100 <= provider_status <= 599
+            else None
+        )
+        self.provider_code = (
+            provider_code
+            if provider_code is not None and _SAFE_TOKEN.fullmatch(provider_code)
+            else None
+        )
+        super().__init__(
+            message,
+            code=code,
+            trace_id=trace_id,
+            backend_name=backend_name,
+            tool_name=tool_name,
+            retryable=retryable,
+            cause=cause,
+            cause_summary=cause_summary,
+        )
+
+    def __repr__(self) -> str:
+        fields = [f"code={self.code!r}", f"retryable={self.retryable!r}"]
+        if self.trace_id is not None:
+            fields.append(f"trace_id={str(self.trace_id)!r}")
+        if self.attempts is not None:
+            fields.append(f"attempts={self.attempts!r}")
+        if self.provider_status is not None:
+            fields.append(f"provider_status={self.provider_status!r}")
+        return f"{type(self).__name__}({', '.join(fields)})"
 
 
 class InvalidModelActionError(ReasoningError):

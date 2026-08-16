@@ -9,6 +9,7 @@ import weakref
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
+from typing import cast
 
 from penampakan.backends.pillow import PillowBackend
 from penampakan.config import Settings, validate_timeout_s
@@ -92,6 +93,8 @@ class AsyncPenampakan:
         cache: Cache | None = None,
         settings: Settings | None = None,
         trace_sinks: Sequence[TraceSink] = (),
+        owns_policy: bool = False,
+        owns_llm: bool = False,
     ) -> None:
         self._settings = self._validated_settings(settings)
         if llm is not None and policy is not None:
@@ -100,17 +103,28 @@ class AsyncPenampakan:
             raise ConfigurationError(code="invalid_llm")
         if policy is not None and not callable(getattr(policy, "next_action", None)):
             raise ConfigurationError(code="invalid_policy")
+        if not isinstance(owns_policy, bool) or not isinstance(owns_llm, bool):
+            raise ConfigurationError(code="invalid_ownership")
+        if owns_llm and llm is None:
+            raise ConfigurationError(code="invalid_ownership")
+        if owns_policy and policy is None:
+            raise ConfigurationError(code="invalid_ownership")
         if self._settings.agent.prompt_version != PROMPT_VERSION:
             raise ConfigurationError(code="unsupported_prompt_version")
+        # The convenience path constructs the policy, so the client owns it and
+        # cascades to the language model only when the caller handed ownership
+        # over. Caller-supplied resources default to caller-owned.
         self._policy = (
             JsonActionPolicy(
                 llm,
                 prompt_version=self._settings.agent.prompt_version,
                 timeout_s=self._settings.run.llm_timeout_s,
+                owns_llm=owns_llm,
             )
             if llm is not None
             else policy
         )
+        self._owns_policy = llm is not None or owns_policy
         self._trace_sinks = self._validate_trace_sinks(trace_sinks)
         self._cache = cache if cache is not None else self._default_cache(self._settings)
         self._validate_cache(self._cache)
@@ -371,19 +385,31 @@ class AsyncPenampakan:
         Active operations drain first so no session is closed underneath a
         caller. Sessions close before the resources they borrow. Single flight
         stops sharing populations before the router closes the backends those
-        populations invoke, the cache closes after the sessions and populations
-        that write to it, and trace sinks close last so every earlier step can
-        still be observed. Caller-owned resources, including a caller-supplied
-        language model or action policy, are never part of this sequence.
+        populations invoke, an owned policy closes after the sessions that call
+        it and cascades to a language model it owns, the cache closes after the
+        sessions and populations that write to it, and trace sinks close last so
+        every earlier step can still be observed. Caller-owned resources,
+        including a caller-supplied language model or action policy, are never
+        part of this sequence, and no shared adapter or external client is
+        closed implicitly.
         """
         return (
             ("active_operations", self._idle.wait),
             ("session", self._close_sessions),
             ("singleflight", self._singleflight.aclose),
             ("router", self._router.aclose),
+            *self._owned_policy_step(),
             ("cache", self._cache.aclose),
             *((f"trace_sink_{index}", sink.aclose) for index, sink in enumerate(self._trace_sinks)),
         )
+
+    def _owned_policy_step(self) -> tuple[tuple[str, Callable[[], Awaitable[object]]], ...]:
+        if not self._owns_policy or self._policy is None:
+            return ()
+        closer = getattr(self._policy, "aclose", None)
+        if not callable(closer):
+            return ()
+        return (("policy", cast("Callable[[], Awaitable[object]]", closer)),)
 
     async def _close_owned(self) -> None:
         """Attempt every owned resource once and retain the first base exception.

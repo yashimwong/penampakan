@@ -948,3 +948,115 @@ async def test_close_warnings_carry_only_redacted_library_details() -> None:
     assert warnings[0].details["error_type"] == "SecretError"
     assert warnings[1].details["error_code"] == "backend_close_failed"
     assert all("secret" not in warning.model_dump_json() for warning in warnings)
+
+
+class ClosableTextLLM:
+    """A minimal language model that records close requests."""
+
+    def __init__(self) -> None:
+        self.close_calls = 0
+
+    async def complete(self, request: LLMRequest) -> LLMResponse:
+        """Return one syntactically valid but unused response."""
+
+        return LLMResponse(text="{}")
+
+    async def aclose(self) -> None:
+        """Record one close request."""
+
+        self.close_calls += 1
+
+
+class ClosablePolicy(ScriptedPolicy):
+    """A scripted policy that records close requests."""
+
+    def __init__(self) -> None:
+        super().__init__(())
+        self.close_calls = 0
+
+    async def aclose(self) -> None:
+        """Record one close request."""
+
+        self.close_calls += 1
+
+
+async def test_convenience_language_model_stays_caller_owned_by_default() -> None:
+    llm = ClosableTextLLM()
+    client = AsyncPenampakan(llm=llm)
+
+    await client.aclose()
+
+    assert client.closed is True
+    assert llm.close_calls == 0
+    assert client.close_warnings == ()
+
+
+async def test_convenience_path_cascades_to_an_owned_language_model() -> None:
+    llm = ClosableTextLLM()
+    client = AsyncPenampakan(llm=llm, owns_llm=True)
+
+    await client.aclose()
+
+    assert llm.close_calls == 1
+
+
+async def test_caller_supplied_policy_is_never_closed_implicitly() -> None:
+    policy = ClosablePolicy()
+    client = AsyncPenampakan(policy=policy)
+
+    await client.aclose()
+
+    assert policy.close_calls == 0
+
+
+async def test_owned_policy_is_closed_exactly_once_in_dependency_order() -> None:
+    policy = ClosablePolicy()
+    client = AsyncPenampakan(policy=policy, owns_policy=True)
+    positions = [name for name, _ in client._close_sequence()]
+
+    await client.aclose()
+    await client.aclose()
+
+    assert positions.index("policy") > positions.index("session")
+    assert positions.index("policy") < positions.index("cache")
+    assert policy.close_calls == 1
+
+
+async def test_owned_policy_close_failure_is_recorded_and_cleanup_continues() -> None:
+    class FailingPolicy(ClosablePolicy):
+        async def aclose(self) -> None:
+            await super().aclose()
+            raise RuntimeError("policy close sentinel")
+
+    policy = FailingPolicy()
+    client = AsyncPenampakan(policy=policy, owns_policy=True)
+
+    await client.aclose()
+
+    assert client.closed is True
+    assert policy.close_calls == 1
+    assert [warning.details["resource"] for warning in client.close_warnings] == ["policy"]
+
+
+async def test_a_policy_without_aclose_is_skipped_when_owned() -> None:
+    policy = ScriptedPolicy(())
+    client = AsyncPenampakan(policy=policy, owns_policy=True)
+
+    await client.aclose()
+
+    assert client.closed is True
+    assert client.close_warnings == ()
+
+
+async def test_ownership_flags_require_the_matching_resource() -> None:
+    with pytest.raises(ConfigurationError) as missing_llm:
+        AsyncPenampakan(owns_llm=True)
+    assert missing_llm.value.code == "invalid_ownership"
+
+    with pytest.raises(ConfigurationError) as missing_policy:
+        AsyncPenampakan(owns_policy=True)
+    assert missing_policy.value.code == "invalid_ownership"
+
+    with pytest.raises(ConfigurationError) as wrong_type:
+        AsyncPenampakan(llm=ClosableTextLLM(), owns_llm=cast(bool, "yes"))
+    assert wrong_type.value.code == "invalid_ownership"

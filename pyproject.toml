@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "penampakan"
-version = "0.1.0"
+version = "0.2.0"
 description = "Safe visual tool orchestration for text-only language models"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
@@ -29,6 +29,13 @@ dependencies = [
 [project.optional-dependencies]
 ocr = ["pytesseract>=0.3.10"]
 transformers = ["transformers>=4.40,<5", "torch>=2.1"]
+# Provider lower bounds are the minimum versions exercised by CI that support
+# the selected strict-output APIs; upper major bounds are pinned because none of
+# these SDKs promises compatibility across a major release.
+openai = ["openai>=2.54,<3"]
+anthropic = ["anthropic>=0.121,<1"]
+litellm = ["litellm>=1.96.2,<2"]
+providers = ["penampakan[anthropic,litellm,openai]"]
 benchmark = [
   "imageio>=2.31",
   "matplotlib>=3.8",
@@ -56,6 +63,7 @@ testpaths = ["tests"]
 markers = [
   "models: tests requiring downloaded model weights",
   "ocr: tests requiring a Tesseract installation",
+  "providers: tests requiring optional provider SDKs",
 ]
 
 [tool.coverage.run]
@@ -85,3 +93,17 @@ plugins = ["pydantic.mypy"]
 [[tool.mypy.overrides]]
 module = ["PIL.*", "pytesseract.*", "transformers.*", "torch.*"]
 ignore_missing_imports = true
+
+# Optional provider packages are absent on a base install, where strict type
+# checking must still pass. Installed SDKs are checked against their real types
+# because ignore_missing_imports only applies to an unresolved import.
+[[tool.mypy.overrides]]
+module = ["openai.*", "anthropic.*", "litellm.*"]
+ignore_missing_imports = true
+
+# Pillow's stubs pull in numpy, whose current stubs use 3.12-only syntax that
+# cannot be parsed under the supported floor of python_version = "3.10".
+[[tool.mypy.overrides]]
+module = ["numpy.*"]
+follow_imports = "skip"
+follow_imports_for_stubs = true

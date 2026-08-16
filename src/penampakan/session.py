@@ -61,6 +61,7 @@ from penampakan.perception.registry import ToolRegistry, ToolResult
 from penampakan.perception.router import BackendRouter, RouteResult
 from penampakan.perception.store import ObservationStore, ProvenanceSpec
 from penampakan.protocols import ActionPolicy, Cache, TraceSink
+from penampakan.reasoning._metrics import collect_policy_call
 from penampakan.reasoning.actions import ActionParseError
 from penampakan.reasoning.answer import materialize_answer, validate_evidence
 from penampakan.reasoning.budget import RunBudget
@@ -68,6 +69,9 @@ from penampakan.reasoning.context import CompiledContext, ContextCompiler
 from penampakan.tracing import TraceBuilder
 
 _PREPROCESSING_VERSION = "normalize-v2"
+# A policy reports typed degradation, not free-form warnings; the bound keeps a
+# misbehaving policy from padding a run's warning list.
+_MAX_POLICY_DEGRADATIONS = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -547,13 +551,18 @@ class AsyncVisionSession:
             invalid_model_output=invalid_model_output,
         )
         try:
-            action = await asyncio.wait_for(
-                self._policy.next_action(policy_input),
-                timeout=budget.component_timeout(self._settings.run.llm_timeout_s),
-            )
+            with collect_policy_call() as metrics:
+                action = await asyncio.wait_for(
+                    self._policy.next_action(policy_input),
+                    timeout=budget.component_timeout(self._settings.run.llm_timeout_s),
+                )
         except asyncio.TimeoutError as error:
             raise LLMError(code="llm_timeout", cause=error) from error
         except ActionParseError as error:
+            await trace.emit(
+                "policy_call_finished",
+                {"action_type": "invalid", "repair": repair, **metrics.as_trace_data()},
+            )
             await trace.emit(
                 "invalid_action",
                 {"code": "invalid_model_action", "repair": repair},
@@ -579,7 +588,9 @@ class AsyncVisionSession:
             raise InvalidModelActionError(code="invalid_policy_action")
         await trace.emit(
             "policy_call_finished",
-            {"action_type": action.type, "repair": repair},
+            # Provider attempts and token counts feed the trace counters, so a
+            # retried provider call is visible in budgets and cost reports.
+            {"action_type": action.type, "repair": repair, **metrics.as_trace_data()},
         )
         return action
 
@@ -654,9 +665,31 @@ class AsyncVisionSession:
             visible_observation_ids=context.visible_observation_ids,
             root_asset_id=self._assets.root_id,
             asset_root_ids=self._asset_root_ids(),
-            warnings=(*warnings, *trace.warnings),
+            warnings=(*warnings, *self._policy_degradations(warnings), *trace.warnings),
             trace=completed_trace,
         )
+
+    def _policy_degradations(
+        self,
+        warnings: Sequence[WarningInfo],
+    ) -> tuple[WarningInfo, ...]:
+        """Return typed policy degradations not already attached to this run.
+
+        A policy may expose an optional ``degradations`` tuple describing typed
+        provider degradation, such as JSON-only schema enforcement. Each code is
+        attached to the run exactly once and no content is copied.
+        """
+        reported = getattr(self._policy, "degradations", ())
+        if not isinstance(reported, tuple):
+            return ()
+        present = {warning.code for warning in warnings}
+        selected: list[WarningInfo] = []
+        for warning in reported[:_MAX_POLICY_DEGRADATIONS]:
+            if not isinstance(warning, WarningInfo) or warning.code in present:
+                continue
+            present.add(warning.code)
+            selected.append(warning)
+        return tuple(selected)
 
     async def _execute_action(
         self,

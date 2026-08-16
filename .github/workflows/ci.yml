@@ -21,9 +21,29 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy --strict src/penampakan
-      - run: pytest -m 'not models and not ocr' --cov=penampakan --cov-fail-under=90
+      - run: pytest -m 'not models and not ocr and not providers' --cov=penampakan --cov-fail-under=90
       - run: python -m build
       - run: python -m twine check dist/*
+
+  provider-sdk:
+    # Exercise the exact provider SDK versions that establish the optional-extra
+    # lower bounds. These tests use recording transports and never need keys or
+    # network access.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+      - run: python -m pip install -e '.[dev,providers]' -c requirements/provider-sdks.txt
+      - run: >-
+          pytest
+          tests/unit/llms
+          tests/contract/test_provider_adapters.py
+          tests/integration/test_openai_sdk.py
+          tests/integration/test_anthropic_sdk.py
+          tests/integration/test_litellm_sdk.py
 
   windows-smoke:
     runs-on: windows-latest
@@ -35,4 +55,4 @@ jobs:
           cache: pip
       - run: python -m pip install -e '.[dev]'
       - run: python -c "import penampakan"
-      - run: pytest -m "not models and not ocr"
+      - run: pytest -m "not models and not ocr and not providers"

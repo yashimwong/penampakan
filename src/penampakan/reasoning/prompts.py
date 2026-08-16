@@ -332,8 +332,13 @@ def build_policy_request(
     *,
     timeout_s: float | None = None,
     max_output_tokens: int = 800,
+    temperature: float = 0.0,
 ) -> LLMRequest:
-    """Build one provider-neutral request with separated system and user messages."""
+    """Build one provider-neutral request with separated system and user messages.
+
+    ``temperature`` stays at the deterministic default unless a caller targets a
+    model whose API only accepts its own sampling default.
+    """
     return LLMRequest(
         messages=(
             Message(
@@ -346,7 +351,7 @@ def build_policy_request(
             input.tools,
             answer_only=input.answer_only,
         ),
-        temperature=0.0,
+        temperature=temperature,
         max_output_tokens=max_output_tokens,
         timeout_s=timeout_s,
         metadata={

@@ -306,6 +306,8 @@ def test_constructor_is_thread_lazy_and_forwards_public_configuration(
         "cache": cache,
         "settings": settings,
         "trace_sinks": (sink,),
+        "owns_policy": False,
+        "owns_llm": False,
     }
 
     client.close()

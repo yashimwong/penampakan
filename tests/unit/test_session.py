@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from inspect import isawaitable
+from typing import cast
 
 import pytest
 
@@ -33,14 +35,17 @@ from penampakan.models import (
     EvidenceRef,
     InspectionOperation,
     InspectionPlan,
+    LLMResponse,
     ObservationDraft,
     OCRRequest,
     PolicyAction,
     PolicyInput,
     TextPayload,
+    TokenUsage,
     ToolAction,
     VisionRequest,
     VisionResult,
+    WarningInfo,
 )
 from tests.fixtures.images import encode_image, quadrants_image
 from tests.unit.reasoning.helpers import ScriptedPolicy, ScriptedTextLLM
@@ -1163,3 +1168,219 @@ async def test_durable_cache_bypass_keeps_single_flight_deduplication(
     assert len(result.observations) == 3
     assert cache.gets == []
     assert cache.sets == []
+
+
+class DegradingPolicy(ScriptedPolicy):
+    """A policy that reports typed provider degradation for a run."""
+
+    def __init__(self, actions: Sequence[PolicyAction], warnings: Sequence[WarningInfo]) -> None:
+        super().__init__(actions)
+        self._warnings = tuple(warnings)
+
+    @property
+    def degradations(self) -> tuple[WarningInfo, ...]:
+        """Return the typed degradation this policy reports."""
+
+        return self._warnings
+
+
+def _degraded_warning() -> WarningInfo:
+    return WarningInfo(
+        code="degraded_schema_enforcement",
+        message="The language model provider could not enforce the action schema strictly.",
+        details={"schema_enforcement": "json_only"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_policy_degradation_is_attached_to_the_run_exactly_once(
+    image_bytes: bytes,
+) -> None:
+    async def analyze(image: BackendImage, request: VisionRequest) -> VisionResult:
+        return _caption_result(request, "Colored quadrants")
+
+    backend = _backend("tests.degraded", (Capability.CAPTION,), analyze)
+    policy = DegradingPolicy(
+        [_answered("obs_000001"), _answered("obs_000001")],
+        (_degraded_warning(), _degraded_warning()),
+    )
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        policy=policy,
+        settings=_settings(),
+    ) as client:
+        session = await client.open_image(image_bytes)
+        first = await session.ask("What is visible?")
+        second = await session.ask("What is visible?")
+        await session.aclose()
+
+    for answer in (first, second):
+        codes = [warning.code for warning in answer.warnings]
+        assert codes.count("degraded_schema_enforcement") == 1
+        warning = next(
+            item
+            for item in answer.warnings
+            if item.code == codes[codes.index("degraded_schema_enforcement")]
+        )
+        assert warning.details == {"schema_enforcement": "json_only"}
+
+
+@pytest.mark.asyncio
+async def test_policy_degradation_is_ignored_when_malformed_or_excessive(
+    image_bytes: bytes,
+) -> None:
+    async def analyze(image: BackendImage, request: VisionRequest) -> VisionResult:
+        return _caption_result(request, "Colored quadrants")
+
+    backend = _backend("tests.malformed", (Capability.CAPTION,), analyze)
+    surplus = tuple(
+        WarningInfo(code=f"degraded_{index}", message="Degraded.") for index in range(9)
+    )
+    policy = DegradingPolicy([_answered("obs_000001")], surplus)
+    policy._warnings = cast(  # type: ignore[assignment]
+        "tuple[WarningInfo, ...]",
+        ("not-a-warning", *surplus),
+    )
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        policy=policy,
+        settings=_settings(),
+    ) as client:
+        answer = await client.ask(image_bytes, "What is visible?")
+
+    degraded = [warning.code for warning in answer.warnings if warning.code.startswith("degraded_")]
+    assert len(degraded) <= 4
+    assert all(isinstance(warning, WarningInfo) for warning in answer.warnings)
+
+
+@pytest.mark.asyncio
+async def test_a_policy_without_degradations_adds_no_warnings(image_bytes: bytes) -> None:
+    async def analyze(image: BackendImage, request: VisionRequest) -> VisionResult:
+        return _caption_result(request, "Colored quadrants")
+
+    backend = _backend("tests.plain", (Capability.CAPTION,), analyze)
+    policy = ScriptedPolicy([_answered("obs_000001")])
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        policy=policy,
+        settings=_settings(),
+    ) as client:
+        answer = await client.ask(image_bytes, "What is visible?")
+
+    assert [warning.code for warning in answer.warnings] == []
+
+
+def _answer_json(observation_id: str) -> str:
+    return json.dumps(
+        {
+            "type": "answer",
+            "status": "answered",
+            "answer": "It contains four colored quadrants.",
+            "evidence": [{"observation_id": observation_id, "supports": "The caption."}],
+        }
+    )
+
+
+@pytest.mark.asyncio
+async def test_provider_attempts_and_tokens_reach_the_run_trace(image_bytes: bytes) -> None:
+    async def analyze(image: BackendImage, request: VisionRequest) -> VisionResult:
+        return _caption_result(request, "Colored quadrants")
+
+    backend = _backend("tests.metrics", (Capability.CAPTION,), analyze)
+    llm = ScriptedTextLLM(
+        [
+            LLMResponse(
+                text=_answer_json("obs_000001"),
+                model_id="provider-model",
+                usage=TokenUsage(input_tokens=11, output_tokens=7),
+                provider="openai",
+                attempts=3,
+            )
+        ]
+    )
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        llm=llm,
+        settings=_settings(),
+    ) as client:
+        answer = await client.ask(image_bytes, "What is shown?")
+
+    assert answer.trace.summary.input_tokens == 11
+    assert answer.trace.summary.output_tokens == 7
+    # One orchestrator reservation, three reported provider attempts.
+    assert answer.trace.summary.llm_calls == 1
+    finished = [
+        event for event in answer.trace.events if event.event_type == "policy_call_finished"
+    ]
+    assert len(finished) == 1
+    assert finished[0].data["provider_attempts"] == 3
+    assert finished[0].data["input_tokens"] == 11
+    assert finished[0].data["schema_enforcement"] == "strict"
+
+
+@pytest.mark.asyncio
+async def test_invalid_response_metrics_are_preserved_when_repair_succeeds(
+    image_bytes: bytes,
+) -> None:
+    async def analyze(image: BackendImage, request: VisionRequest) -> VisionResult:
+        return _caption_result(request, "Colored quadrants")
+
+    backend = _backend("tests.repair_metrics", (Capability.CAPTION,), analyze)
+    llm = ScriptedTextLLM(
+        [
+            LLMResponse(
+                text="not valid JSON",
+                usage=TokenUsage(input_tokens=5, output_tokens=2),
+                attempts=2,
+            ),
+            LLMResponse(
+                text=_answer_json("obs_000001"),
+                usage=TokenUsage(input_tokens=11, output_tokens=7),
+                attempts=3,
+            ),
+        ]
+    )
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        llm=llm,
+        settings=_settings(),
+    ) as client:
+        answer = await client.ask(image_bytes, "What is shown?")
+
+    assert answer.trace.summary.llm_calls == 2
+    assert answer.trace.summary.input_tokens == 16
+    assert answer.trace.summary.output_tokens == 9
+    finished = [
+        event for event in answer.trace.events if event.event_type == "policy_call_finished"
+    ]
+    assert [event.data["action_type"] for event in finished] == ["invalid", "answer"]
+    assert [event.data["provider_attempts"] for event in finished] == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_a_response_without_usage_reports_no_token_counters(image_bytes: bytes) -> None:
+    async def analyze(image: BackendImage, request: VisionRequest) -> VisionResult:
+        return _caption_result(request, "Colored quadrants")
+
+    backend = _backend("tests.no_usage", (Capability.CAPTION,), analyze)
+    llm = ScriptedTextLLM([_answer_json("obs_000001")])
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        llm=llm,
+        settings=_settings(),
+    ) as client:
+        answer = await client.ask(image_bytes, "What is shown?")
+
+    assert answer.trace.summary.input_tokens is None
+    assert answer.trace.summary.output_tokens is None
+    finished = next(
+        event for event in answer.trace.events if event.event_type == "policy_call_finished"
+    )
+    assert "input_tokens" not in finished.data
+    assert finished.data["provider_attempts"] == 1

@@ -1,0 +1,5 @@
+# Exact provider SDK versions exercised by the provider-sdk CI job.
+# Keep these aligned with the lower bounds in [project.optional-dependencies].
+openai==2.54.0
+anthropic==0.121.0
+litellm==1.96.2

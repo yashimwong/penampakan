@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
 from penampakan.errors import InvalidModelActionError, LLMError
-from penampakan.models import AnswerAction, LLMResponse, PolicyInput, ToolAction
+from penampakan.models import (
+    AnswerAction,
+    LLMResponse,
+    PolicyInput,
+    SchemaEnforcement,
+    ToolAction,
+)
 from penampakan.reasoning.actions import ActionParseError
 from penampakan.reasoning.policy import JsonActionPolicy
 from tests.unit.reasoning.helpers import ScriptedTextLLM, make_policy_input
@@ -153,3 +161,107 @@ def test_policy_constructor_rejects_unsupported_prompt_and_output_limit() -> Non
         JsonActionPolicy(llm, prompt_version="agent-v2")
     with pytest.raises(ValueError, match="positive"):
         JsonActionPolicy(llm, max_output_tokens=0)
+
+
+class _ClosableTextLLM(ScriptedTextLLM):
+    """A scripted language model that counts its close calls."""
+
+    def __init__(self, responses: list[str | LLMResponse]) -> None:
+        super().__init__(responses)
+        self.close_calls = 0
+
+    async def aclose(self) -> None:
+        """Record one close request."""
+
+        self.close_calls += 1
+
+
+def _answer(text: str = "More evidence is required.") -> str:
+    return f'{{"type":"answer","status":"insufficient_evidence","answer":"{text}"}}'
+
+
+@pytest.mark.asyncio
+async def test_json_only_enforcement_is_reported_once_as_typed_policy_state() -> None:
+    degraded = LLMResponse(text=_answer(), schema_enforcement=SchemaEnforcement.JSON_ONLY)
+    policy = JsonActionPolicy(ScriptedTextLLM([degraded, degraded]))
+
+    assert policy.degradations == ()
+
+    await policy.next_action(make_policy_input())
+    await policy.next_action(make_policy_input())
+
+    assert len(policy.degradations) == 1
+    warning = policy.degradations[0]
+    assert warning.code == "degraded_schema_enforcement"
+    assert warning.details == {"schema_enforcement": "json_only"}
+
+
+@pytest.mark.asyncio
+async def test_strict_enforcement_reports_no_degradation() -> None:
+    policy = JsonActionPolicy(ScriptedTextLLM([_answer()]))
+
+    await policy.next_action(make_policy_input())
+
+    assert policy.degradations == ()
+
+
+@pytest.mark.asyncio
+async def test_policy_closes_an_owned_language_model_exactly_once() -> None:
+    llm = _ClosableTextLLM([])
+    policy = JsonActionPolicy(llm, owns_llm=True)
+
+    assert policy.owns_llm is True
+    await policy.aclose()
+    await policy.aclose()
+
+    assert llm.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_policy_leaves_a_caller_owned_language_model_open() -> None:
+    llm = _ClosableTextLLM([])
+    policy = JsonActionPolicy(llm)
+
+    assert policy.owns_llm is False
+    async with policy:
+        pass
+
+    assert llm.close_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_policy_context_manager_closes_an_owned_language_model() -> None:
+    llm = _ClosableTextLLM([_answer()])
+
+    async with JsonActionPolicy(llm, owns_llm=True) as policy:
+        await policy.next_action(make_policy_input())
+
+    assert llm.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_policy_forwards_a_configured_temperature() -> None:
+    llm = ScriptedTextLLM([_answer()])
+    policy = JsonActionPolicy(llm, temperature=1.0)
+
+    await policy.next_action(make_policy_input())
+
+    assert llm.requests[0].temperature == 1.0
+
+
+@pytest.mark.asyncio
+async def test_policy_defaults_to_a_deterministic_temperature() -> None:
+    llm = ScriptedTextLLM([_answer()])
+
+    await JsonActionPolicy(llm).next_action(make_policy_input())
+
+    assert llm.requests[0].temperature == 0.0
+
+
+def test_policy_constructor_rejects_invalid_ownership_and_temperature() -> None:
+    llm = ScriptedTextLLM([])
+
+    with pytest.raises(TypeError, match="owns_llm"):
+        JsonActionPolicy(llm, owns_llm=cast(bool, "yes"))
+    with pytest.raises(TypeError, match="temperature"):
+        JsonActionPolicy(llm, temperature=cast(float, "hot"))

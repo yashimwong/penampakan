@@ -35,10 +35,19 @@ Optional integrations are installed separately:
 ```bash
 python -m pip install 'penampakan[ocr]'
 python -m pip install 'penampakan[transformers]'
+python -m pip install 'penampakan[openai]'
+python -m pip install 'penampakan[anthropic]'
+python -m pip install 'penampakan[litellm]'
+python -m pip install 'penampakan[providers]'
 ```
 
 The OCR extra installs the Python adapter; the Tesseract executable must also
 be available on the system.
+
+Provider packages stay optional. Every adapter class imports on a base install,
+so `from penampakan.llms import OpenAITextLLM` always succeeds; only
+constructing an adapter without its extra raises
+`ConfigurationError(code="missing_optional_dependency")`.
 
 ## Quick start
 
@@ -72,6 +81,82 @@ For evidence-grounded question answering, construct `AsyncPenampakan` or
 `Penampakan` with a `TextLLM` implementation and the vision backends needed for
 the task, then call `ask(image, question)`. `CallableTextLLM` and
 `CallableVisionBackend` are available as adapters for application functions.
+
+### Provider adapters
+
+`OpenAITextLLM`, `AnthropicTextLLM`, and `LiteLLMTextLLM` compile the library's
+action schema into a named, versioned provider subset, enforce one total request
+deadline across retries, and report refusal, truncation, retry exhaustion, and
+schema degradation as distinct redacted outcomes.
+
+A caller-owned adapter stays open when the client closes, so nest the context
+managers:
+
+```python
+import asyncio
+
+from penampakan import AsyncPenampakan
+from penampakan.llms import AnthropicTextLLM
+
+
+async def main() -> None:
+    async with AnthropicTextLLM(model="claude-opus-5") as llm:
+        async with AsyncPenampakan(llm=llm) as vision:
+            answer = await vision.ask("receipt.png", "What is the total?")
+            print(answer.answer)
+
+
+asyncio.run(main())
+```
+
+Hand ownership to the client instead when it should close the adapter for you:
+
+```python
+async with AsyncPenampakan(llm=AnthropicTextLLM(model="claude-opus-5"), owns_llm=True) as vision:
+    answer = await vision.ask("receipt.png", "What is the total?")
+```
+
+`owns_policy` does the same for a caller-supplied `ActionPolicy`. Both default to
+caller-owned, and no shared adapter or external SDK client is ever closed
+implicitly.
+
+An adapter that constructs its own SDK client disables that client's native
+retries so provider attempts cannot multiply. When you inject a client and also
+configure `RetryPolicy`, disable its native retries yourself
+(`max_retries=0`).
+
+A requested parameter the selected model does not support fails configuration
+instead of disappearing. OpenAI reasoning-family models reject `temperature`, so
+target them with the model's own sampling default rather than the library's
+deterministic one:
+
+```python
+from penampakan import AsyncPenampakan
+from penampakan.llms import OpenAITextLLM
+from penampakan.reasoning.policy import JsonActionPolicy
+
+policy = JsonActionPolicy(OpenAITextLLM(model="gpt-5"), temperature=1.0, owns_llm=True)
+client = AsyncPenampakan(policy=policy, owns_policy=True)
+```
+
+Retry counts and token usage from every provider call appear in the run trace, so
+a retried call is visible in budgets and cost reports even though it consumes one
+orchestrator language-model reservation.
+
+`LiteLLMTextLLM` requires an explicit opt-in before it will degrade:
+
+```python
+from penampakan.llms import LiteLLMTextLLM
+
+# Raises ConfigurationError(code="strict_schema_unavailable") when the model
+# cannot enforce a schema.
+strict = LiteLLMTextLLM(model="gpt-4o")
+
+# Explicitly accepts JSON-only enforcement. Every run then carries exactly one
+# WarningInfo(code="degraded_schema_enforcement"), and responses report
+# schema_enforcement=SchemaEnforcement.JSON_ONLY.
+degraded = LiteLLMTextLLM(model="some/older-model", allow_json_only=True)
+```
 
 Input images may be PNG, JPEG, or WebP paths, encoded bytes, binary streams, or
 Pillow images. Remote URLs are rejected by default. Images are orientation

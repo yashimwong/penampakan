@@ -53,7 +53,14 @@ class VisionBackend(Protocol):
 
 
 class ActionPolicy(Protocol):
-    """Decision policy for selecting the next validated action."""
+    """Decision policy for selecting the next validated action.
+
+    An implementation MAY expose a ``degradations: tuple[WarningInfo, ...]``
+    attribute reporting typed provider degradation, such as JSON-only schema
+    enforcement. The set only grows, and each reported code is attached to a run
+    exactly once. An implementation MAY also expose ``aclose`` so a caller that
+    owns the policy can release it.
+    """
 
     async def next_action(self, input: PolicyInput) -> PolicyAction:
         """Choose the next action from the compiled policy input."""
