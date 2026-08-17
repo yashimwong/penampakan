@@ -7,10 +7,10 @@
   "license": "Public domain; no known copyright restrictions",
   "objects": [
     {
-      "label": "person",
-      "box": [0.04, 0.01, 0.96, 1.0],
+      "label": "helmet",
+      "box": [0.53, 0.65, 1.0, 1.0],
       "min_confidence": 0.2,
-      "min_iou": 0.3
+      "min_iou": 0.8
     }
   ]
 }
