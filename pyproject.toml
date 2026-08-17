@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "penampakan"
-version = "0.2.0"
+version = "0.2.1"
 description = "Safe visual tool orchestration for text-only language models"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
@@ -61,6 +61,8 @@ addopts = "--strict-config --strict-markers"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
+  "integration: real-dependency or real-weight integration tests",
+  "integration_category(name): required integration outcome category",
   "models: tests requiring downloaded model weights",
   "ocr: tests requiring a Tesseract installation",
   "providers: tests requiring optional provider SDKs",

@@ -361,6 +361,31 @@ def test_hub_cache_binary_weights_resolve_and_config_paths_do_not(
     assert not unresolved.descriptor.durable_cache_eligible
 
 
+def test_hub_cache_metadata_resolves_sharded_weight_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cached = SimpleNamespace(
+        commit_hash=_DETECTION_COMMIT,
+        refs=frozenset({"release"}),
+        files=(SimpleNamespace(file_name="model-00001-of-00002.safetensors"),),
+    )
+    repository = SimpleNamespace(repo_id="org/detection", revisions=(cached,))
+    hub = SimpleNamespace(
+        scan_cache_dir=lambda: SimpleNamespace(repos=(repository,)),
+        try_to_load_from_cache=lambda **kwargs: pytest.fail("legacy lookup used"),
+    )
+    monkeypatch.setitem(sys.modules, "huggingface_hub", cast(ModuleType, hub))
+
+    backend = TransformersDetectionBackend(
+        "org/detection",
+        revision="release",
+        local_files_only=True,
+    )
+
+    assert backend.descriptor.model_revision == _DETECTION_COMMIT
+    assert backend.descriptor.durable_cache_eligible
+
+
 @pytest.mark.parametrize(
     "located",
     [
@@ -468,6 +493,37 @@ async def test_missing_extra_and_model_load_failures_are_cached(
         with pytest.raises(BackendUnavailableError) as raised:
             await failed_load.analyze(_backend_image(), request)
         assert raised.value.code == "transformers_model_load_failed"
+
+
+@pytest.mark.asyncio
+async def test_partial_pipeline_setup_releases_created_resource(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class NonCallablePipeline:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    created = NonCallablePipeline()
+    runtime = SimpleNamespace(
+        transformers=SimpleNamespace(pipeline=lambda *args, **kwargs: created),
+        torch=SimpleNamespace(inference_mode=lambda: contextmanager(lambda: iter((None,)))()),
+    )
+
+    def load(name: str) -> object:
+        return getattr(runtime, name)
+
+    monkeypatch.setattr(importlib, "import_module", load)
+    backend = TransformersCaptionBackend(revision=_CAPTION_COMMIT)
+
+    for _ in range(2):
+        with pytest.raises(BackendUnavailableError) as raised:
+            await backend.analyze(_backend_image(), CaptionRequest())
+        assert raised.value.code == "transformers_model_load_failed"
+
+    assert created.close_calls == 1
 
 
 @pytest.mark.asyncio

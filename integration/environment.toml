@@ -1,0 +1,51 @@
+[runtime]
+python = "3.12.11"
+os = "Debian 12 (bookworm)"
+os_snapshot = "20250630T000000Z"
+base_image = "python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7"
+architecture = "x86_64"
+cuda = "none"
+
+[ocr]
+tesseract = "5.3.0-2"
+tessdata_eng = "1:4.1.0-2"
+tessdata_ara = "1:4.1.0-2"
+
+[python]
+pillow = "11.2.1"
+pytesseract = "0.3.13"
+torch = "2.7.1"
+transformers = "4.53.0"
+huggingface_hub = "0.33.1"
+
+[models.caption]
+id = "Salesforce/blip-image-captioning-base"
+revision = "82a37760796d32b1411fe092ab5d4e227313294b"
+
+[models.detection]
+id = "IDEA-Research/grounding-dino-tiny"
+revision = "a2bb814dd30d776dcf7e30523b00659f4f141c71"
+
+[fixtures.astronaut]
+file = "tests/fixtures/natural/astronaut.png"
+sha256 = "88431cd9653ccd539741b555fb0a46b61558b301d4110412b5bc28b5e3ea6cb5"
+source_commit = "ecd06885a44eec47cf268af923cd55e79db8a686"
+license = "Public domain; no known copyright restrictions"
+label = "person"
+box = [0.04, 0.01, 0.96, 1.0]
+min_confidence = 0.2
+min_iou = 0.3
+
+[[fonts]]
+package = "fonts-dejavu-core"
+version = "2.37-6"
+file = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+license = "Bitstream Vera and Arev licenses"
+license_file = "/usr/share/doc/fonts-dejavu-core/copyright"
+
+[[fonts]]
+package = "fonts-hosny-amiri"
+version = "0.113-1"
+file = "/usr/share/fonts/opentype/fonts-hosny-amiri/Amiri-Regular.ttf"
+license = "SIL Open Font License 1.1"
+license_file = "/usr/share/doc/fonts-hosny-amiri/copyright"

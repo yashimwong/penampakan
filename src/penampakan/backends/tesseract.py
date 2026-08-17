@@ -373,7 +373,14 @@ class TesseractBackend:
                 )
             )
         warnings: tuple[WarningInfo, ...] = ()
-        if request.min_confidence is not None and unfiltered_count and not drafts:
+        if not unfiltered_count:
+            warnings = (
+                WarningInfo(
+                    code="no_text_detected",
+                    message="Tesseract detected no text in the requested image region.",
+                ),
+            )
+        elif request.min_confidence is not None and not drafts:
             warnings = (
                 WarningInfo(
                     code="no_text_above_threshold",

@@ -242,4 +242,47 @@ mypy --strict src/penampakan
 pytest -m 'not models and not ocr'
 ```
 
+The default pull-request suite is fast and excludes provider, OCR, and model
+integration tests:
+
+```bash
+pytest -m 'not models and not ocr and not providers'
+```
+
+The reproducible real-dependency suite uses the pinned environment in
+[`integration/environment.toml`](integration/environment.toml):
+
+```bash
+docker build -f docker/integration.Dockerfile -t penampakan-integration .
+mkdir -p .cache/huggingface
+docker run --rm \
+  -v "$PWD/.cache/huggingface:/cache/huggingface" \
+  -e HF_HOME=/cache/huggingface \
+  penampakan-integration python integration/prepare_models.py
+docker run --rm \
+  -v "$PWD:/workspace" \
+  -v "$PWD/.cache/huggingface:/cache/huggingface" \
+  -e HF_HOME=/cache/huggingface \
+  -e HF_HUB_OFFLINE=1 \
+  -e TRANSFORMERS_OFFLINE=1 \
+  -e PENAMPAKAN_REQUIRE_INTEGRATION=ocr,geometry,caption,detection,e2e \
+  penampakan-integration pytest -m integration tests/integration
+```
+
+Missing local binaries or model snapshots produce actionable skips when the
+guard is absent. Setting `PENAMPAKAN_REQUIRE_INTEGRATION` to a comma-separated
+category list makes the run fail unless every named category completes at least
+one non-skipped test. Use `1` to require all categories.
+
+The `integration` workflow runs on pushes to the default branch, every Monday,
+and for prereleases. It is also available through **Run workflow**. Add the
+`integration` label to a pull request to opt in when changing adapters,
+normalization, dependencies, fixtures, or model defaults. Run the workflow and
+require it to pass before publishing a release.
+
+```bash
+gh pr edit <number> --add-label integration
+gh workflow run integration.yml --ref <release-commit>
+```
+
 Penampakan is licensed under the MIT License. See [LICENSE](LICENSE).

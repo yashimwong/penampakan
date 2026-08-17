@@ -330,6 +330,20 @@ async def test_minimum_confidence_filters_after_grouping(
 
 
 @pytest.mark.asyncio
+async def test_blank_output_reports_no_text_detected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakePytesseract(data=_data(conf=[-1], text=[""]))
+    _install(monkeypatch, fake)
+    backend = TesseractBackend()
+
+    result = await backend.analyze(_backend_image(), OCRRequest())
+
+    assert result.observations == ()
+    assert tuple(item.code for item in result.warnings) == ("no_text_detected",)
+
+
+@pytest.mark.asyncio
 async def test_concurrent_first_use_probes_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

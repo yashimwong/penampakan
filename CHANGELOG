@@ -1,3 +1,13 @@
+Penampakan 0.2.1
+Released 2026-08-18
+
+Real-dependency integration coverage now exercises pinned Tesseract and
+Transformers environments, deterministic processor geometry, cleanup, EXIF
+orientation, Arabic tessdata, and immutable model provenance. Real-weight
+goldens use the public-domain NASA astronaut fixture with recorded caption and
+detection revisions, confidence and IoU thresholds, attribution, and SHA-256.
+The scheduled integration workflow fails when any required category only skips.
+
 Penampakan 0.2.0
 Released 2026-08-16
 

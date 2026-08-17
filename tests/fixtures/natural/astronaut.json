@@ -1,0 +1,16 @@
+{
+  "file": "astronaut.png",
+  "sha256": "88431cd9653ccd539741b555fb0a46b61558b301d4110412b5bc28b5e3ea6cb5",
+  "source": "https://github.com/scikit-image/scikit-image/blob/ecd06885a44eec47cf268af923cd55e79db8a686/src/skimage/data/astronaut.png",
+  "source_commit": "ecd06885a44eec47cf268af923cd55e79db8a686",
+  "credit": "NASA; distributed by scikit-image",
+  "license": "Public domain; no known copyright restrictions",
+  "objects": [
+    {
+      "label": "person",
+      "box": [0.04, 0.01, 0.96, 1.0],
+      "min_confidence": 0.2,
+      "min_iou": 0.3
+    }
+  ]
+}

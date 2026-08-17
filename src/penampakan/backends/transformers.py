@@ -46,11 +46,25 @@ _LABEL_TRAILING_PUNCTUATION = " \t\r\n.,:;!?"
 _NMS_IOU = 0.8
 _COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 _SNAPSHOT_DIRECTORY = "snapshots"
-_WEIGHT_FILENAMES = ("model.safetensors", "pytorch_model.bin")
+_WEIGHT_FILENAMES = (
+    "model.safetensors",
+    "model.safetensors.index.json",
+    "pytorch_model.bin",
+    "pytorch_model.bin.index.json",
+)
+_WEIGHT_SHARD = re.compile(r"(?:model|pytorch_model)-\d{5}-of-\d{5}\.(?:safetensors|bin)")
 
 
 class _Pipeline(Protocol):
     def __call__(self, image: PillowImage, **kwargs: object) -> object: ...
+
+
+class _TransformersModule(Protocol):
+    pipeline: Callable[..., object]
+
+
+class _TorchModule(Protocol):
+    inference_mode: Callable[[], AbstractContextManager[object]]
 
 
 class _Detection:
@@ -129,6 +143,52 @@ def _snapshot_commit(located: object) -> str | None:
     return None
 
 
+def _cached_revision_from_metadata(
+    hub: object,
+    model_id: str,
+    revision: str | None,
+) -> str | None:
+    scan = getattr(hub, "scan_cache_dir", None)
+    if not callable(scan):
+        return None
+    try:
+        repositories = scan().repos
+    except Exception:
+        return None
+    selected = revision if revision is not None else "main"
+    try:
+        iterator = iter(repositories)
+    except TypeError:
+        return None
+    for repository in iterator:
+        if getattr(repository, "repo_id", None) != model_id:
+            continue
+        cached_revisions = getattr(repository, "revisions", ())
+        try:
+            revision_iterator = iter(cached_revisions)
+        except TypeError:
+            continue
+        for cached in revision_iterator:
+            commit = getattr(cached, "commit_hash", None)
+            refs = getattr(cached, "refs", ())
+            if not isinstance(commit, str) or _COMMIT_SHA.fullmatch(commit) is None:
+                continue
+            if selected != commit and selected not in refs:
+                continue
+            files = getattr(cached, "files", ())
+            try:
+                names = (getattr(item, "file_name", None) for item in files)
+                if any(
+                    isinstance(name, str)
+                    and (name in _WEIGHT_FILENAMES or _WEIGHT_SHARD.fullmatch(name))
+                    for name in names
+                ):
+                    return commit
+            except TypeError:
+                continue
+    return None
+
+
 def _resolve_model_revision(
     model_id: str,
     revision: str | None,
@@ -150,6 +210,12 @@ def _resolve_model_revision(
         hub = importlib.import_module("huggingface_hub")
     except ImportError:
         return None
+    try:
+        commit = _cached_revision_from_metadata(hub, model_id, revision)
+    except Exception:
+        commit = None
+    if commit is not None:
+        return commit
     lookup = getattr(hub, "try_to_load_from_cache", None)
     if not callable(lookup):
         return None
@@ -250,6 +316,27 @@ def _pipeline_items(value: object) -> tuple[object, ...]:
     return tuple(value)
 
 
+def _create_pipeline(
+    transformers: _TransformersModule,
+    torch: _TorchModule,
+    *,
+    task: str,
+    model_id: str,
+    revision: str | None,
+    device: str | int | None,
+    local_files_only: bool,
+) -> tuple[object, object]:
+    created = transformers.pipeline(
+        task,
+        model=model_id,
+        revision=revision,
+        device=device,
+        trust_remote_code=False,
+        model_kwargs={"local_files_only": local_files_only},
+    )
+    return created, torch.inference_mode
+
+
 class _TransformersBackend:
     def __init__(
         self,
@@ -329,23 +416,28 @@ class _TransformersBackend:
                 )
                 self._load_error = unavailable
                 raise unavailable from error
+            created: object | None = None
             try:
-                factory = cast(Callable[..., object], transformers.pipeline)
-                created = factory(
-                    self._task,
-                    model=self._model_id,
+                created, raw_inference_mode = _create_pipeline(
+                    cast(_TransformersModule, transformers),
+                    cast(_TorchModule, torch),
+                    task=self._task,
+                    model_id=self._model_id,
                     revision=self._revision,
                     device=self._device,
-                    trust_remote_code=False,
-                    model_kwargs={"local_files_only": self._local_files_only},
+                    local_files_only=self._local_files_only,
                 )
                 inference_mode = cast(
                     Callable[[], AbstractContextManager[object]],
-                    torch.inference_mode,
+                    raw_inference_mode,
                 )
                 if not callable(created) or not callable(inference_mode):
                     raise TypeError("Transformers pipeline boundaries are not callable")
             except Exception as error:
+                close = getattr(created, "close", None)
+                if callable(close):
+                    with suppress(Exception):
+                        close()
                 unavailable = BackendUnavailableError(
                     code="transformers_model_load_failed",
                     retryable=False,

@@ -1,9 +1,30 @@
+import asyncio
+
+import pytest
 from PIL import Image
+from PIL import __version__ as pillow_version
 
 from penampakan.backends.pillow import PillowBackend
 from penampakan.image.assets import AssetStore
 from penampakan.models import Box, ColorsPayload, ColorsRequest, MetadataPayload, MetadataRequest
 from tests.fixtures.images import quadrants_image, transparent_image
+
+
+async def test_descriptor_reports_library_preprocessing_and_close_is_idempotent() -> None:
+    backend = PillowBackend()
+    source = Image.new("RGB", (1, 1))
+    store = AssetStore.create(source)
+
+    assert backend.descriptor.version == f"{pillow_version}+penampakan.1"
+    assert backend.descriptor.model_id is None
+    assert backend.descriptor.model_revision is None
+    assert backend.descriptor.durable_cache_eligible
+
+    await asyncio.gather(backend.aclose(), backend.aclose())
+    with pytest.raises(RuntimeError, match="closed"):
+        await backend.analyze(store.backend_image(store.root_id), MetadataRequest())
+    store.close()
+    source.close()
 
 
 async def test_metadata_uses_authoritative_normalized_asset() -> None:
