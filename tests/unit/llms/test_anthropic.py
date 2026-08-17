@@ -608,17 +608,20 @@ async def test_extra_body_passes_caller_options_through() -> None:
 
 
 @pytest.mark.parametrize(
-    "failure",
+    "failure_factory",
     [
-        status_error(429),
-        status_error(500),
-        status_error(529),
-        connection_error(),
-        timeout_error(),
+        lambda: status_error(429),
+        lambda: status_error(500),
+        lambda: status_error(529),
+        connection_error,
+        timeout_error,
     ],
     ids=["rate_limited", "server_error", "overloaded", "connection", "timeout"],
 )
-async def test_retryable_failures_are_retried_and_counted(failure: BaseException) -> None:
+async def test_retryable_failures_are_retried_and_counted(
+    failure_factory: Callable[[], BaseException],
+) -> None:
+    failure = failure_factory()
     client = FakeClient(failure, text_message())
     llm = adapter(
         client,
