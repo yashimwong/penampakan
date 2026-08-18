@@ -70,8 +70,12 @@ class ActionPolicy(Protocol):
 class Cache(Protocol):
     """Asynchronous byte cache for versioned validated JSON values.
 
-    An implementation MAY expose a ``durable: bool`` attribute declaring that
-    entries survive the current process; an absent attribute means non-durable.
+    An implementation MAY expose an optional ``durable: bool`` attribute.
+    Declaring ``durable = False`` asserts that no entry can outlive the current
+    process. The attribute is not a required protocol member: when it is absent,
+    or set to anything other than the exact value ``False``, the library assumes
+    the cache is durable. Durable is therefore the default.
+
     A durable cache is bypassed for backends whose descriptor is not
     ``durable_cache_eligible``, because their results cannot be attributed to an
     exact weight identity across processes.

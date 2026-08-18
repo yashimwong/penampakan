@@ -72,6 +72,14 @@ _PREPROCESSING_VERSION = "normalize-v2"
 # A policy reports typed degradation, not free-form warnings; the bound keeps a
 # misbehaving policy from padding a run's warning list.
 _MAX_POLICY_DEGRADATIONS = 4
+# Spec 06 F5: an unresolved weight identity is reported on every result, whichever
+# backend served the call. The wording matches the adapter-level signal so a caller
+# sees one uniform code and message.
+_UNRESOLVED_REVISION_CODE = "unresolved_model_revision"
+_UNRESOLVED_REVISION_MESSAGE = (
+    "The exact model weight revision is unresolved; pin an immutable "
+    "commit revision for reproducible inference and durable caching."
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1263,9 +1271,12 @@ class AsyncVisionSession:
                     duration_ms=0,
                     cache_hit=True,
                 )
-                warnings = (
-                    *result.warnings,
-                    *self._empty_result_warnings(request, result),
+                warnings = self._with_unresolved_revision_warning(
+                    first,
+                    (
+                        *result.warnings,
+                        *self._empty_result_warnings(request, result),
+                    ),
                 )
                 return _PerceptionOutcome(asset_id, result, provenance, warnings)
         route_result: RouteResult | None = None
@@ -1335,11 +1346,14 @@ class AsyncVisionSession:
                     },
                     duration_ms=attempt.duration_ms,
                 )
-        warnings = (
-            *((cache_warning,) if cache_warning is not None else ()),
-            *route_warnings,
-            *result.warnings,
-            *self._empty_result_warnings(request, result),
+        warnings = self._with_unresolved_revision_warning(
+            descriptor,
+            (
+                *((cache_warning,) if cache_warning is not None else ()),
+                *route_warnings,
+                *result.warnings,
+                *self._empty_result_warnings(request, result),
+            ),
         )
         provenance = self._provenance(
             tool_name,
@@ -1353,6 +1367,30 @@ class AsyncVisionSession:
     @staticmethod
     def _cache_allowed(durable: bool, descriptor: BackendDescriptor) -> bool:
         return not durable or descriptor.durable_cache_eligible
+
+    @staticmethod
+    def _with_unresolved_revision_warning(
+        descriptor: BackendDescriptor,
+        warnings: tuple[WarningInfo, ...],
+    ) -> tuple[WarningInfo, ...]:
+        """Return ``warnings`` carrying the unresolved-revision signal exactly once.
+
+        A backend that declares a model identity without a resolved weight revision
+        is excluded from durable caches, so every result it serves must say so. The
+        signal is attached here for the descriptor that actually served the call; an
+        adapter that already reports the code keeps its own warning unduplicated.
+        """
+        if descriptor.model_id is None or descriptor.model_revision is not None:
+            return warnings
+        if any(warning.code == _UNRESOLVED_REVISION_CODE for warning in warnings):
+            return warnings
+        return (
+            WarningInfo(
+                code=_UNRESOLVED_REVISION_CODE,
+                message=_UNRESOLVED_REVISION_MESSAGE,
+            ),
+            *warnings,
+        )
 
     async def _safe_cache_get(self, key: str) -> bytes | None:
         try:

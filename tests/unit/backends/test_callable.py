@@ -159,7 +159,16 @@ async def test_close_callable_runs_once_for_concurrent_close() -> None:
     assert close_calls == 1
 
 
-@pytest.mark.parametrize("shape", ["coroutine_function", "partial", "async_call_object"])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "coroutine_function",
+        "partial",
+        "async_call_object",
+        "partial_of_async_call_object",
+        "nested_partial_of_async_call_object",
+    ],
+)
 async def test_async_analyzers_run_on_the_loop_thread(shape: str) -> None:
     loop_thread = threading.get_ident()
     analyzer_threads: list[int] = []
@@ -175,10 +184,13 @@ async def test_async_analyzers_run_on_the_loop_thread(shape: str) -> None:
             await asyncio.sleep(0)
             return result()
 
+    async_analyzer = AsyncAnalyzer()
     analyzers: dict[str, AnalyzeCallable] = {
         "coroutine_function": analyze,
         "partial": functools.partial(analyze),
-        "async_call_object": AsyncAnalyzer(),
+        "async_call_object": async_analyzer,
+        "partial_of_async_call_object": functools.partial(async_analyzer),
+        "nested_partial_of_async_call_object": functools.partial(functools.partial(async_analyzer)),
     }
 
     with opened_store() as store, recording_executor() as executor:
@@ -217,7 +229,16 @@ async def test_sync_analyzer_returning_awaitable_awaits_on_the_loop_thread() -> 
         await backend.aclose()
 
 
-@pytest.mark.parametrize("shape", ["coroutine_function", "partial", "async_call_object"])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "coroutine_function",
+        "partial",
+        "async_call_object",
+        "partial_of_async_call_object",
+        "nested_partial_of_async_call_object",
+    ],
+)
 async def test_async_close_callables_run_on_the_loop_thread(shape: str) -> None:
     loop_thread = threading.get_ident()
     close_threads: list[int] = []
@@ -231,10 +252,13 @@ async def test_async_close_callables_run_on_the_loop_thread(shape: str) -> None:
             close_threads.append(threading.get_ident())
             await asyncio.sleep(0)
 
+    async_closer = AsyncCloser()
     closers: dict[str, CloseCallable] = {
         "coroutine_function": close,
         "partial": functools.partial(close),
-        "async_call_object": AsyncCloser(),
+        "async_call_object": async_closer,
+        "partial_of_async_call_object": functools.partial(async_closer),
+        "nested_partial_of_async_call_object": functools.partial(functools.partial(async_closer)),
     }
     backend = CallableVisionBackend(
         descriptor(),
@@ -329,3 +353,47 @@ async def test_cancelling_threaded_analyze_propagates_cancellation() -> None:
                 await task
         finally:
             release.set()
+
+
+async def test_cancelling_async_close_propagates_cancellation() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def close() -> None:
+        started.set()
+        await release.wait()
+
+    backend = CallableVisionBackend(descriptor(), lambda image, request: result(), close=close)
+    task = asyncio.create_task(backend.aclose())
+
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    release.set()
+    await backend.aclose()
+
+
+async def test_cancelling_threaded_close_propagates_cancellation() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def close() -> None:
+        started.set()
+        release.wait(30)
+
+    backend = CallableVisionBackend(descriptor(), lambda image, request: result(), close=close)
+    task = asyncio.create_task(backend.aclose())
+    try:
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+
+    await backend.aclose()

@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased
+
+Breaking: an unpinned `TesseractBackend` now reports an extra trailing
+`unpinned_engine_version` warning on every OCR result, and a caller-supplied
+`Cache` that does not declare `durable = False` is treated as durable, so it is
+bypassed for a backend whose model weight revision is unresolved. Declare
+`durable = False` on a process-local cache to keep the previous behavior.
+
+- Client shutdown no longer loses the exception it retained when the internal
+  close task is itself cancelled, as `asyncio.run()` shutdown and a `TaskGroup`
+  abort both do. A retained cancellation is withdrawn from the close task so it
+  completes normally, and `aclose` re-raises the retained primary instead of the
+  task's own `CancelledError`. Repeated closes observe the same primary.
+- Shutdown now marks the client closed before releasing backend ownership, and
+  records a redacted `backend_ownership` close warning if that release fails, so
+  a failing release can no longer leave `closed` unset or shadow the primary
+  exception.
+- Cancelling a client close while owned sessions are still closing no longer
+  discards the failures the finished sessions already reported. The session
+  gather runs in a shielded task, every session is still attempted, and a base
+  exception reported by a session takes precedence over the cancellation.
+- The whole client constructor after the backend-ownership claim is now guarded,
+  so a failure while constructing the built-in Pillow backend or resolving the
+  authoritative metadata preference releases the claim instead of leaving a
+  caller backend registered to a client that never finished constructing.
+- `functools.partial` wrapping an object whose `__call__` is asynchronous is now
+  detected as an async callable. It previously consumed a worker thread merely to
+  construct its coroutine, because `inspect.iscoroutinefunction` unwraps a partial
+  only far enough to read a function's code flags.
+- Cancelling an application callable that runs in a worker thread and returns an
+  awaitable now closes that awaitable instead of abandoning it unawaited.
+- Every result served by a backend that declares a model identity without a
+  resolved weight revision now carries `unresolved_model_revision`, whichever
+  backend served it. The signal was previously emitted only by the Transformers
+  adapter, so a callable or third-party backend in that state was silently
+  excluded from durable caches without saying so.
+- `Cache.durable` is now fail-closed: only an explicit `durable = False` opts a
+  cache out. A caller-supplied durable cache that omitted the declaration was
+  previously treated as ephemeral and used for backends whose weight identity is
+  unresolved, contradicting the retention rule it was meant to enforce. The
+  shipped `NullCache` and `MemoryLRUCache` declare `durable = False` and are
+  unaffected.
+- `TesseractBackend` accepts an optional `engine_version` that pins the concrete
+  Tesseract engine build into `BackendDescriptor.version`, verified against the
+  running binary on first analysis and failing as
+  `BackendUnavailableError(code="tesseract_engine_version_mismatch")` on a
+  mismatch, so two engine builds never share a durable perception cache key. An
+  unpinned backend keeps its previous descriptor and now reports the probed
+  engine version on every result as `WarningInfo(code="unpinned_engine_version")`.
+  ADR 0003 records why the version is pinned by the caller rather than probed.
+
 ## Penampakan 0.3.0
 Released 2026-08-18
 

@@ -74,6 +74,10 @@ class FixedPolicy:
 
 
 class MemoryCache:
+    # A dict cannot outlive the process, so the declaration is truthful. An
+    # implementation that omits it is assumed durable.
+    durable = False
+
     def __init__(self) -> None:
         self.values: dict[str, bytes] = {}
         self.sizes: dict[str, int] = {}
@@ -88,6 +92,19 @@ class MemoryCache:
 
     async def aclose(self) -> None:
         self.close_count += 1
+
+
+class UndeclaredCache:
+    """A protocol-conforming cache that never declares its retention."""
+
+    async def get(self, key: str) -> bytes | None:
+        return None
+
+    async def set(self, key: str, value: bytes, *, size: int) -> None:
+        return None
+
+    async def aclose(self) -> None:
+        return None
 
 
 class RecordingTraceSink:
@@ -240,6 +257,7 @@ async def test_cache_uses_bytes_and_keyword_only_accounted_size() -> None:
     assert cache.sizes == {"cache-key": 5}
     assert cache.close_count == 1
     assert is_durable_cache(cache) is False
+    assert is_durable_cache(UndeclaredCache()) is True
 
 
 async def test_trace_sink_receives_typed_redacted_event() -> None:

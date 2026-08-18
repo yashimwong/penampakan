@@ -28,6 +28,7 @@ from penampakan.models import (
     OCRRequest,
     TextPayload,
 )
+from penampakan.perception.cache import build_perception_cache_key
 
 
 def _backend_image(width: int = 100, height: int = 100) -> BackendImage:
@@ -80,11 +81,13 @@ class FakePytesseract:
         *,
         data: Mapping[str, Sequence[object]] | None = None,
         languages: Sequence[str] = ("eng",),
+        version: str = "5.4.1",
     ) -> None:
         self.Output = SimpleNamespace(DICT=object())
         self.pytesseract = SimpleNamespace(tesseract_cmd="system-tesseract")
         self.data = dict(data or _data())
         self.languages = list(languages)
+        self.version = version
         self.version_calls = 0
         self.language_calls = 0
         self.analysis_calls = 0
@@ -92,7 +95,7 @@ class FakePytesseract:
 
     def get_tesseract_version(self) -> str:
         self.version_calls += 1
-        return "5.4.1"
+        return self.version
 
     def get_languages(self, config: str = "") -> list[str]:
         self.language_calls += 1
@@ -371,7 +374,10 @@ async def test_minimum_confidence_filters_after_grouping(
     )
 
     assert result.observations == ()
-    assert tuple(item.code for item in result.warnings) == ("no_text_above_threshold",)
+    assert tuple(item.code for item in result.warnings) == (
+        "no_text_above_threshold",
+        "unpinned_engine_version",
+    )
 
 
 @pytest.mark.asyncio
@@ -385,7 +391,10 @@ async def test_blank_output_reports_no_text_detected(
     result = await backend.analyze(_backend_image(), OCRRequest())
 
     assert result.observations == ()
-    assert tuple(item.code for item in result.warnings) == ("no_text_detected",)
+    assert tuple(item.code for item in result.warnings) == (
+        "no_text_detected",
+        "unpinned_engine_version",
+    )
 
 
 @pytest.mark.asyncio
@@ -490,3 +499,100 @@ def test_language_and_configuration_selection_change_the_backend_version() -> No
     assert baseline.descriptor.model_id is None
     assert baseline.descriptor.model_revision is None
     assert baseline.descriptor.durable_cache_eligible is True
+
+
+@pytest.mark.asyncio
+async def test_unpinned_engine_version_is_reported_on_every_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakePytesseract(version="5.3.0")
+    _install(monkeypatch, fake)
+    backend = TesseractBackend()
+
+    first = await backend.analyze(_backend_image(), OCRRequest())
+    second = await backend.analyze(_backend_image(), OCRRequest())
+
+    for result in (first, second):
+        assert result.observations
+        assert tuple(item.code for item in result.warnings) == ("unpinned_engine_version",)
+        warning = result.warnings[0]
+        # The concrete engine version reaches the caller even when it cannot
+        # enter the construction-time descriptor identity.
+        assert warning.details == {"engine_version": "5.3.0"}
+        assert "engine_version" in warning.message
+    # The unpinned descriptor stays exactly as it was before first use.
+    assert backend.descriptor.version == "1.0+lang.eng"
+    assert backend.descriptor.model_id is None
+    assert backend.descriptor.model_revision is None
+
+
+@pytest.mark.asyncio
+async def test_pinned_engine_version_replaces_the_identity_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakePytesseract(version="5.4.1")
+    _install(monkeypatch, fake)
+    backend = TesseractBackend(engine_version="5.4.1")
+
+    result = await backend.analyze(_backend_image(), OCRRequest())
+
+    assert result.observations
+    assert result.warnings == ()
+    assert backend.descriptor.version == "5.4.1+penampakan.1.0+lang.eng"
+    assert backend.descriptor.model_id is None
+    assert backend.descriptor.model_revision is None
+    assert backend.descriptor.durable_cache_eligible is True
+
+
+def test_pinned_engine_versions_do_not_share_a_durable_cache_key() -> None:
+    older = TesseractBackend(engine_version="5.3.0")
+    newer = TesseractBackend(engine_version="5.4.1")
+    unpinned = TesseractBackend()
+    request = OCRRequest()
+
+    keys = tuple(
+        build_perception_cache_key(
+            asset_digest_sha256="a" * 64,
+            request=request,
+            backend=backend.descriptor,
+            preprocessing_version="normalize-v2",
+        )
+        for backend in (older, newer, unpinned)
+    )
+
+    assert older.descriptor.version == "5.3.0+penampakan.1.0+lang.eng"
+    assert newer.descriptor.version == "5.4.1+penampakan.1.0+lang.eng"
+    assert len(set(keys)) == 3
+    # Pinning the engine build does not disturb the preprocessing identity.
+    assert TesseractBackend(engine_version="5.4.1", config="--oem 1").descriptor.version != (
+        newer.descriptor.version
+    )
+    assert all(backend.descriptor.model_id is None for backend in (older, newer, unpinned))
+
+
+@pytest.mark.asyncio
+async def test_pinned_engine_version_mismatch_is_diagnosed_and_cached(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = FakePytesseract(version="5.3.0")
+    _install(monkeypatch, fake)
+    backend = TesseractBackend(engine_version="5.4.1")
+
+    for _ in range(2):
+        with pytest.raises(BackendUnavailableError) as raised:
+            await backend.analyze(_backend_image(), OCRRequest())
+        assert raised.value.code == "tesseract_engine_version_mismatch"
+        assert raised.value.backend_name == "tesseract"
+
+    # A pinned identity is never allowed to describe a different running binary,
+    # and the failed diagnosis is not repeated or followed by inference.
+    assert fake.version_calls == 1
+    assert fake.analysis_calls == 0
+
+
+def test_invalid_engine_version_is_rejected_at_construction() -> None:
+    with pytest.raises(TypeError):
+        TesseractBackend(engine_version=cast(str, 5.4))
+    for value in ("", "  ", "5.4.1 (beta)", "x" * 65):
+        with pytest.raises(ValueError):
+            TesseractBackend(engine_version=value)

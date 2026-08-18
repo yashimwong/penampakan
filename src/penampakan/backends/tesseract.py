@@ -46,6 +46,7 @@ from penampakan.models import (
 
 _ADAPTER_VERSION = "1.0"
 _BACKEND_NAME = "tesseract"
+_ENGINE_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.+:~-]{0,63}$")
 _LANGUAGE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _PAYLOAD_LANGUAGE = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
 _MODE_PSM = {"auto": 3, "sparse": 11, "dense": 6, "single_line": 7}
@@ -117,24 +118,43 @@ class _InvalidTSVError(ValueError):
 
 
 class TesseractBackend:
-    """Provide structured line OCR through a lazily diagnosed Tesseract runtime."""
+    """Provide structured line OCR through a lazily diagnosed Tesseract runtime.
+
+    ``engine_version`` pins the concrete Tesseract engine build this backend is
+    configured against. Executing the binary is the only way to learn that
+    version, and construction stays free of subprocesses, so the value is
+    supplied by the caller and verified against the running binary on first
+    analysis; a mismatch fails as ``BackendUnavailableError``. When it is
+    pinned, the engine version becomes part of ``BackendDescriptor.version``,
+    which is the identity that reaches provenance and the perception cache key,
+    so results from different engine builds never share a durable cache entry.
+    When it is not pinned, every result carries
+    ``WarningInfo(code="unpinned_engine_version")`` reporting the engine version
+    that actually produced it.
+    """
 
     def __init__(
         self,
         *,
         executable: str | os.PathLike[str] | None = None,
+        engine_version: str | None = None,
         languages: Sequence[str] = ("eng",),
         config: str = "",
         max_concurrency: int = 2,
     ) -> None:
         require_extra("ocr", "pytesseract")
         self._executable = self._validate_executable(executable)
+        self._engine_version = self._validate_engine_version(engine_version)
         self._languages = self._validate_languages(languages)
         self._config = self._validate_config(config)
         concurrency = self._validate_concurrency(max_concurrency)
         self._descriptor = BackendDescriptor(
             name=_BACKEND_NAME,
-            version=self._preprocessing_version(self._languages, self._config),
+            version=self._descriptor_version(
+                self._engine_version,
+                self._languages,
+                self._config,
+            ),
             capabilities=(
                 CapabilityDescriptor(
                     capability=Capability.OCR,
@@ -259,6 +279,16 @@ class TesseractBackend:
                 failure = _DiagnosticFailure("tesseract_binary_unavailable", error)
                 self._diagnostic_failure = failure
                 raise self._unavailable(failure) from error
+            if (
+                self._engine_version is not None
+                and diagnostics.runtime_version != self._engine_version
+            ):
+                mismatch = RuntimeError(
+                    "the running Tesseract engine version differs from the pinned version"
+                )
+                failure = _DiagnosticFailure("tesseract_engine_version_mismatch", mismatch)
+                self._diagnostic_failure = failure
+                raise self._unavailable(failure) from mismatch
             missing = tuple(
                 language
                 for language in self._languages
@@ -318,6 +348,7 @@ class TesseractBackend:
                 )
             return self._build_result(
                 data,
+                diagnostics.runtime_version,
                 request,
                 selected_languages,
                 working.width,
@@ -332,6 +363,7 @@ class TesseractBackend:
     def _build_result(
         self,
         data: Mapping[str, Sequence[object]],
+        runtime_version: str,
         request: OCRRequest,
         selected_languages: tuple[str, ...],
         working_width: int,
@@ -389,7 +421,26 @@ class TesseractBackend:
                     message="No OCR text met the requested confidence threshold.",
                 ),
             )
-        return VisionResult(observations=tuple(drafts), warnings=warnings)
+        return VisionResult(
+            observations=tuple(drafts),
+            warnings=(*warnings, *self._identity_warnings(runtime_version)),
+        )
+
+    def _identity_warnings(self, runtime_version: str) -> tuple[WarningInfo, ...]:
+        """Report the engine build when it is absent from the backend identity."""
+        if self._engine_version is not None:
+            return ()
+        return (
+            WarningInfo(
+                code="unpinned_engine_version",
+                message=(
+                    "The Tesseract engine version is not part of this backend identity, "
+                    "so durable cache entries cannot be attributed to one engine build; "
+                    "pass engine_version to pin it."
+                ),
+                details={"engine_version": runtime_version},
+            ),
+        )
 
     @classmethod
     def _parse_words(
@@ -610,6 +661,17 @@ class TesseractBackend:
         return executable
 
     @staticmethod
+    def _validate_engine_version(value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise TypeError("engine_version must be text")
+        engine_version = value.strip()
+        if _ENGINE_VERSION.fullmatch(engine_version) is None:
+            raise ValueError("engine_version must be a compact version token")
+        return engine_version
+
+    @staticmethod
     def _validate_languages(value: Sequence[str]) -> tuple[str, ...]:
         if isinstance(value, (str, bytes, bytearray)) or not isinstance(value, Sequence):
             raise TypeError("languages must be a sequence of identifiers")
@@ -624,6 +686,27 @@ class TesseractBackend:
             raise ValueError("languages must be unique")
         return languages
 
+    @classmethod
+    def _descriptor_version(
+        cls,
+        engine_version: str | None,
+        languages: tuple[str, ...],
+        config: str,
+    ) -> str:
+        """Return the descriptor identity, leading with a pinned engine version.
+
+        A pinned engine build is reported the way the Pillow backend reports its
+        library version: the concrete engine version first, then the adapter
+        marker and the preprocessing selections. An unpinned backend keeps the
+        preprocessing version alone, because the router snapshots the descriptor
+        once at registration and a descriptor that gained the engine version
+        after the first analysis would never reach a cache key or provenance.
+        """
+        preprocessing = cls._preprocessing_version(languages, config)
+        if engine_version is None:
+            return preprocessing
+        return f"{engine_version}+penampakan.{preprocessing}"
+
     @staticmethod
     def _preprocessing_version(languages: tuple[str, ...], config: str) -> str:
         """Return the adapter version with its construction-time OCR selections.
@@ -635,7 +718,7 @@ class TesseractBackend:
         preprocessing version that the perception cache key covers. The
         Tesseract runtime version itself is only knowable by executing the
         binary, which the lazy diagnosis defers to the first analysis, so it
-        cannot appear in a descriptor that must be stable from construction.
+        joins this version only when the caller pins it at construction.
         """
         version = f"{_ADAPTER_VERSION}+lang.{'+'.join(languages)}"
         if not config:

@@ -56,9 +56,11 @@ request semantics, size, geometry, confidence, and text bounds before commit.
 
 Model-backed vision descriptors should contain an immutable model revision. If
 the adapter cannot resolve one, it emits `unresolved_model_revision` and its
-descriptor is not eligible for a durable cross-process cache. Process-local
-single-flight deduplication and memory caching remain safe because they do not
-claim reproducibility across model generations.
+descriptor is not eligible for a durable cross-process cache. A caller-supplied
+cache counts as durable unless it declares `durable = False`, so an
+undeclared cache is bypassed rather than trusted. Process-local single-flight
+deduplication and the shipped memory caches remain safe because they declare
+themselves non-durable and claim no reproducibility across model generations.
 
 The current API accepts exactly one root image per session. There is therefore
 no multi-image ordering or aggregate-image budget to configure yet. Do not build
@@ -92,10 +94,11 @@ stores nothing. `CacheSettings(enabled=True)` selects a bounded process-local
 LRU containing validated serialized `VisionResult` values, which can include OCR
 text and captions; it is cleared on client close. Cache keys bind the canonical
 asset digest, request, capability, backend/version/model revision,
-preprocessing version, and cache schema version. A caller-supplied cache with
-`durable=True` declares cross-process retention and is skipped for unresolved
-model revisions. Its persistence, encryption, access controls, TTL, backups, and
-deletion behavior are the caller's responsibility.
+preprocessing version, and cache schema version. A caller-supplied cache is
+treated as cross-process durable unless it declares `durable = False`, and a
+durable cache is skipped for unresolved model revisions. Its persistence,
+encryption, access controls, TTL, backups, and deletion behavior are the
+caller's responsibility.
 
 Trace content flags never enable a cache. Cache settings never weaken trace
 redaction.

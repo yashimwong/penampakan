@@ -40,6 +40,22 @@ def _backend(
     )
 
 
+class _ProtocolOnlyCache:
+    """A caller-supplied cache implementing exactly the documented ``Cache`` members."""
+
+    def __init__(self) -> None:
+        self._values: dict[str, bytes] = {}
+
+    async def get(self, key: str) -> bytes | None:
+        return self._values.get(key)
+
+    async def set(self, key: str, value: bytes, *, size: int) -> None:
+        self._values[key] = value
+
+    async def aclose(self) -> None:
+        self._values.clear()
+
+
 def _cache_key(
     *,
     asset_digest_sha256: str = "a" * 64,
@@ -248,18 +264,45 @@ def test_durable_cache_eligibility_truth_table(
     assert descriptor.durable_cache_eligible is eligible
 
 
-def test_process_local_caches_are_not_durable() -> None:
-    class DurableCache(NullCache):
-        durable = True
-
-    class ConfusedCache(NullCache):
-        durable = "yes"  # type: ignore[assignment]
-
+def test_shipped_process_local_caches_declare_themselves_ephemeral() -> None:
+    assert NullCache.durable is False
+    assert MemoryLRUCache.durable is False
     assert is_durable_cache(NullCache()) is False
     assert is_durable_cache(MemoryLRUCache()) is False
-    assert is_durable_cache(object()) is False
+
+
+def test_cache_without_durable_declaration_is_treated_as_durable() -> None:
+    class UndeclaredCache(_ProtocolOnlyCache):
+        """A caller cache written against the protocol without declaring durability."""
+
+    assert hasattr(UndeclaredCache(), "durable") is False
+    assert is_durable_cache(UndeclaredCache()) is True
+    assert is_durable_cache(object()) is True
+
+
+def test_cache_declaring_durable_false_is_ephemeral() -> None:
+    class EphemeralCache(_ProtocolOnlyCache):
+        durable = False
+
+    assert is_durable_cache(EphemeralCache()) is False
+
+
+def test_cache_declaring_durable_true_is_durable() -> None:
+    class DurableCache(_ProtocolOnlyCache):
+        durable = True
+
     assert is_durable_cache(DurableCache()) is True
-    assert is_durable_cache(ConfusedCache()) is False
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [0, 1, None, "", "no", "yes", (), []],
+)
+def test_only_the_exact_false_sentinel_opts_out_of_durability(declared: object) -> None:
+    class ConfusedCache(_ProtocolOnlyCache):
+        durable = declared
+
+    assert is_durable_cache(ConfusedCache()) is True
 
 
 def test_cache_key_is_deterministic_and_validates_components() -> None:

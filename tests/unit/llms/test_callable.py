@@ -123,7 +123,16 @@ async def test_close_callable_runs_once_and_post_close_completion_fails(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("shape", ["coroutine_function", "partial", "async_call_object"])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "coroutine_function",
+        "partial",
+        "async_call_object",
+        "partial_of_async_call_object",
+        "nested_partial_of_async_call_object",
+    ],
+)
 async def test_async_completions_run_on_the_loop_thread(shape: str) -> None:
     loop_thread = threading.get_ident()
     completion_threads: list[int] = []
@@ -139,10 +148,15 @@ async def test_async_completions_run_on_the_loop_thread(shape: str) -> None:
             await asyncio.sleep(0)
             return LLMResponse(text="{}")
 
+    async_completer = AsyncCompleter()
     completers: dict[str, CompleteCallable] = {
         "coroutine_function": complete,
         "partial": functools.partial(complete),
-        "async_call_object": AsyncCompleter(),
+        "async_call_object": async_completer,
+        "partial_of_async_call_object": functools.partial(async_completer),
+        "nested_partial_of_async_call_object": functools.partial(
+            functools.partial(async_completer)
+        ),
     }
     llm = CallableTextLLM(completers[shape])
 
@@ -178,7 +192,16 @@ async def test_sync_completion_returning_awaitable_awaits_on_the_loop_thread() -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("shape", ["coroutine_function", "partial", "async_call_object"])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "coroutine_function",
+        "partial",
+        "async_call_object",
+        "partial_of_async_call_object",
+        "nested_partial_of_async_call_object",
+    ],
+)
 async def test_async_close_callables_run_on_the_loop_thread(shape: str) -> None:
     loop_thread = threading.get_ident()
     close_threads: list[int] = []
@@ -192,10 +215,13 @@ async def test_async_close_callables_run_on_the_loop_thread(shape: str) -> None:
             close_threads.append(threading.get_ident())
             await asyncio.sleep(0)
 
+    async_closer = AsyncCloser()
     closers: dict[str, CloseCallable] = {
         "coroutine_function": close,
         "partial": functools.partial(close),
-        "async_call_object": AsyncCloser(),
+        "async_call_object": async_closer,
+        "partial_of_async_call_object": functools.partial(async_closer),
+        "nested_partial_of_async_call_object": functools.partial(functools.partial(async_closer)),
     }
     llm = CallableTextLLM(lambda request: "{}", close=closers[shape])
 
@@ -284,6 +310,52 @@ async def test_cancelling_threaded_completion_propagates_cancellation() -> None:
             await task
     finally:
         release.set()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_async_close_propagates_cancellation() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def close() -> None:
+        started.set()
+        await release.wait()
+
+    llm = CallableTextLLM(lambda request: "{}", close=close)
+    task = asyncio.create_task(llm.aclose())
+
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    release.set()
+    await llm.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancelling_threaded_close_propagates_cancellation() -> None:
+    started = threading.Event()
+    release = threading.Event()
+
+    def close() -> None:
+        started.set()
+        release.wait(30)
+
+    llm = CallableTextLLM(lambda request: "{}", close=close)
+    task = asyncio.create_task(llm.aclose())
+    try:
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+
+    await llm.aclose()
 
 
 def test_constructor_requires_callable_boundaries() -> None:

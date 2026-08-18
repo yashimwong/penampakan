@@ -524,3 +524,45 @@ def test_concurrent_session_close_and_failure_outcomes_are_idempotent(
     with pytest.raises(RuntimeError) as repeated:
         client.close()
     assert repeated.value is close_error
+
+
+class RetainedBaseException(BaseException):
+    """A base exception the asynchronous client retains and re-raises."""
+
+
+def test_client_close_propagates_and_repeats_a_retained_base_exception(
+    harness: FakeClientHarness,
+) -> None:
+    client = harness.create()
+    asynchronous = harness.async_clients[0]
+    close_error = RetainedBaseException()
+    asynchronous.close_error = close_error
+
+    with pytest.raises(RetainedBaseException) as first:
+        client.close()
+    with pytest.raises(RetainedBaseException) as repeated:
+        client.close()
+
+    assert first.value is close_error
+    assert repeated.value is close_error
+    assert asynchronous.close_calls == 1
+    assert asynchronous.closed is False
+    assert not _loop_thread_ids()
+
+
+def test_concurrent_client_closes_share_one_retained_base_exception(
+    harness: FakeClientHarness,
+) -> None:
+    client = harness.create()
+    asynchronous = harness.async_clients[0]
+    close_error = RetainedBaseException()
+    asynchronous.close_error = close_error
+    asynchronous.close_delay = 0.05
+
+    results, errors = _concurrently(client.close, count=5)
+
+    assert not results
+    assert len(errors) == 5
+    assert all(error is close_error for error in errors)
+    assert asynchronous.close_calls == 1
+    assert not _loop_thread_ids()

@@ -1049,7 +1049,13 @@ class _RecordingCache:
 
 
 class _ModelCaptionBackend:
-    def __init__(self, *, model_revision: str | None, delay_s: float = 0.0) -> None:
+    def __init__(
+        self,
+        *,
+        model_revision: str | None,
+        delay_s: float = 0.0,
+        warnings: Sequence[WarningInfo] = (),
+    ) -> None:
         self._descriptor = BackendDescriptor(
             name="tests.model_caption",
             version="1.0",
@@ -1059,6 +1065,7 @@ class _ModelCaptionBackend:
             max_concurrency=4,
         )
         self._delay_s = delay_s
+        self._warnings = tuple(warnings)
         self.calls = 0
 
     @property
@@ -1073,7 +1080,8 @@ class _ModelCaptionBackend:
         self.calls += 1
         if self._delay_s:
             await asyncio.sleep(self._delay_s)
-        return _caption_result(request, "A four-color image")
+        result = _caption_result(request, "A four-color image")
+        return VisionResult(observations=result.observations, warnings=self._warnings)
 
     async def aclose(self) -> None:
         return None
@@ -1168,6 +1176,116 @@ async def test_durable_cache_bypass_keeps_single_flight_deduplication(
     assert len(result.observations) == 3
     assert cache.gets == []
     assert cache.sets == []
+
+
+_UNRESOLVED_REVISION = "unresolved_model_revision"
+
+
+def _adapter_unresolved_warning() -> WarningInfo:
+    return WarningInfo(
+        code=_UNRESOLVED_REVISION,
+        message=(
+            "The exact model weight revision is unresolved; pin an immutable "
+            "commit revision for reproducible inference and durable caching."
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_unresolved_model_weights_warn_on_every_inspection(image_bytes: bytes) -> None:
+    backend = _ModelCaptionBackend(model_revision=None)
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        settings=_settings(()),
+    ) as client:
+        result = await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    assert [warning.code for warning in result.warnings] == [_UNRESOLVED_REVISION]
+    assert result.warnings[0].message == _adapter_unresolved_warning().message
+    assert result.observations[0].provenance.model_revision is None
+
+
+@pytest.mark.asyncio
+async def test_unresolved_model_weights_warn_on_every_run(image_bytes: bytes) -> None:
+    backend = _ModelCaptionBackend(model_revision=None)
+    policy = ScriptedPolicy([_answered("obs_000001")])
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        policy=policy,
+        settings=_settings(),
+    ) as client:
+        answer = await client.ask(image_bytes, "What is visible?")
+
+    assert [warning.code for warning in answer.warnings] == [_UNRESOLVED_REVISION]
+
+
+@pytest.mark.asyncio
+async def test_a_backend_reported_unresolved_warning_is_not_duplicated(
+    image_bytes: bytes,
+) -> None:
+    backend = _ModelCaptionBackend(
+        model_revision=None,
+        warnings=(_adapter_unresolved_warning(),),
+    )
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        settings=_settings(()),
+    ) as client:
+        result = await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    assert [warning.code for warning in result.warnings] == [_UNRESOLVED_REVISION]
+    assert result.warnings[0] == _adapter_unresolved_warning()
+
+
+@pytest.mark.asyncio
+async def test_resolved_model_weights_report_no_unresolved_warning(image_bytes: bytes) -> None:
+    backend = _ModelCaptionBackend(model_revision="a" * 40)
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        settings=_settings(()),
+    ) as client:
+        result = await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    assert [warning.code for warning in result.warnings] == []
+    assert result.observations[0].provenance.model_revision == "a" * 40
+
+
+@pytest.mark.asyncio
+async def test_a_non_model_backend_reports_no_unresolved_warning(image_bytes: bytes) -> None:
+    plan = InspectionPlan(
+        operations=(InspectionOperation(request=ColorsRequest()),),
+        include_available_overview=False,
+    )
+
+    async with AsyncPenampakan(settings=_settings(())) as client:
+        result = await client.inspect(image_bytes, plan)
+
+    assert result.observations[0].provenance.model_id is None
+    assert [warning.code for warning in result.warnings] == []
+
+
+@pytest.mark.asyncio
+async def test_unresolved_model_weights_warn_on_an_ephemeral_cache_hit(
+    image_bytes: bytes,
+) -> None:
+    backend = _ModelCaptionBackend(model_revision=None)
+    cache = _RecordingCache(durable=False)
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        cache=cache,
+        settings=_settings(()),
+    ) as client:
+        await client.inspect(image_bytes, _duplicate_caption_plan(1))
+        second = await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    assert backend.calls == 1
+    assert second.observations[0].provenance.cache_hit is True
+    assert [warning.code for warning in second.warnings] == [_UNRESOLVED_REVISION]
 
 
 class DegradingPolicy(ScriptedPolicy):

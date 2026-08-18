@@ -131,12 +131,13 @@ class AsyncPenampakan:
         self._close_warnings: list[WarningInfo] = []
         caller_backends = tuple(backends)
         self._claim_backend_ownership(caller_backends)
-        pillow = PillowBackend()
-        metadata_preferences = self._settings.backend_preferences.get(Capability.METADATA)
-        if metadata_preferences not in {None, (pillow.descriptor.name,)}:
-            self._release_backend_ownership()
-            raise ConfigurationError(code="authoritative_backend_preference")
+        # Every step after the claim runs guarded: a client that never finishes
+        # constructing must not leave a caller backend registered to it.
         try:
+            pillow = PillowBackend()
+            metadata_preferences = self._settings.backend_preferences.get(Capability.METADATA)
+            if metadata_preferences not in {None, (pillow.descriptor.name,)}:
+                raise ConfigurationError(code="authoritative_backend_preference")
             self._router = BackendRouter(
                 (pillow, *caller_backends),
                 preferences=self._settings.backend_preferences,
@@ -146,19 +147,19 @@ class AsyncPenampakan:
                 authoritative_backends={Capability.METADATA: pillow.descriptor.name},
             )
             self._tools = self._build_tools(self._router)
+            self._singleflight: SingleFlightCoordinator[bytes] = SingleFlightCoordinator()
+            self._sessions: set[AsyncVisionSession] = set()
+            self._state_lock = asyncio.Lock()
+            self._idle = asyncio.Event()
+            self._idle.set()
+            self._active_operations = 0
+            self._closing = False
+            self._closed = False
+            self._close_task: asyncio.Task[None] | None = None
+            self._close_failure: BaseException | None = None
         except BaseException:
             self._release_backend_ownership()
             raise
-        self._singleflight: SingleFlightCoordinator[bytes] = SingleFlightCoordinator()
-        self._sessions: set[AsyncVisionSession] = set()
-        self._state_lock = asyncio.Lock()
-        self._idle = asyncio.Event()
-        self._idle.set()
-        self._active_operations = 0
-        self._closing = False
-        self._closed = False
-        self._close_task: asyncio.Task[None] | None = None
-        self._close_failure: BaseException | None = None
 
     @property
     def settings(self) -> Settings:
@@ -261,7 +262,13 @@ class AsyncPenampakan:
                 # The caller was cancelled: let the protected cleanup finish
                 # before the caller's own cancellation resumes.
                 await self._drain_close(close_task)
-            raise
+                raise
+            if not close_task.cancelled() or self._close_failure is None:
+                raise
+            # The close task itself ended cancelled, so the shield re-raised the
+            # task's cancellation rather than the caller's. Cleanup still ran and
+            # retained a primary exception, which must not be replaced by the
+            # cancellation that interrupted it.
         if self._close_failure is not None:
             raise self._close_failure
 
@@ -433,26 +440,84 @@ class AsyncPenampakan:
                 except BaseException as error:
                     if primary is None:
                         primary = error
+                    if isinstance(error, asyncio.CancelledError):
+                        # Consume the request so this task completes normally.
+                        # A task left in the cancelled state would hand its own
+                        # ``CancelledError`` to every awaiting caller in place of
+                        # the retained primary exception.
+                        self._uncancel_current_task()
         finally:
-            self._close_failure = primary
-            self._release_backend_ownership()
+            # ``closed`` is set before any further work so a failure while
+            # releasing ownership cannot leave the client reporting itself open.
             self._closed = True
+            try:
+                self._release_backend_ownership()
+            except Exception as error:
+                self._record_close_warning("backend_ownership", error)
+            self._close_failure = primary
 
     async def _close_sessions(self) -> None:
         sessions = tuple(self._sessions)
         if not sessions:
             return
-        results = await asyncio.gather(*(self._close_one_session(session) for session in sessions))
+        worker: asyncio.Task[list[BaseException | None]] = asyncio.create_task(
+            self._gather_session_closes(sessions)
+        )
+        cancellation: BaseException | None = None
+        try:
+            results = await asyncio.shield(worker)
+        except asyncio.CancelledError as cancelled:
+            # Cancelling the gather would abandon the remaining sessions and
+            # discard the failures the finished ones already reported.
+            cancellation = cancelled
+            self._uncancel_current_task()
+            results = await self._drain_sessions(worker)
         primary: BaseException | None = None
-        for error in results:
-            if error is None:
+        for failure in results:
+            if failure is None:
                 continue
-            if isinstance(error, Exception):
-                self._record_close_warning("session", error)
+            if isinstance(failure, Exception):
+                self._record_close_warning("session", failure)
             elif primary is None:
-                primary = error
+                primary = failure
+        # A failure reported by an owned session is the primary one; the
+        # cancellation that interrupted the wait stands only when none was.
+        if primary is None:
+            primary = cancellation
         if primary is not None:
             raise primary
+
+    async def _gather_session_closes(
+        self,
+        sessions: tuple[AsyncVisionSession, ...],
+    ) -> list[BaseException | None]:
+        return list(
+            await asyncio.gather(*(self._close_one_session(session) for session in sessions))
+        )
+
+    @staticmethod
+    async def _drain_sessions(
+        worker: asyncio.Task[list[BaseException | None]],
+    ) -> list[BaseException | None]:
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+            except BaseException:
+                break
+        if worker.cancelled() or worker.exception() is not None:
+            return []
+        return worker.result()
+
+    @staticmethod
+    def _uncancel_current_task() -> None:
+        """Withdraw one delivered cancellation request from the running task."""
+        # ``Task.uncancel`` exists from Python 3.11. An older loop keeps no
+        # cancellation count, and the delivered request is already consumed.
+        uncancel = getattr(asyncio.current_task(), "uncancel", None)
+        if callable(uncancel):
+            uncancel()
 
     @staticmethod
     async def _close_one_session(session: AsyncVisionSession) -> BaseException | None:

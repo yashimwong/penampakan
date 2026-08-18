@@ -64,9 +64,14 @@ def build_perception_cache_key(
 
 
 def is_durable_cache(cache: object) -> bool:
-    """Return whether a cache claims retention beyond the current process generation."""
+    """Return whether a cache must be treated as retaining values beyond this process.
 
-    return getattr(cache, "durable", False) is True
+    Only an explicit ``durable = False`` opts a cache out. An absent or
+    non-``False`` declaration is treated as durable, because a missed cache hit
+    is cheaper than a false claim of cross-process reproducibility.
+    """
+
+    return getattr(cache, "durable", True) is not False
 
 
 class NullCache:
