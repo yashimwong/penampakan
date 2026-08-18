@@ -1,6 +1,7 @@
 # Changelog
 
-## Unreleased
+## Penampakan 0.5.0
+Released 2026-08-18
 
 Breaking: `CacheSettings.enabled` is replaced by `CacheSettings.mode`, one of
 `"off"`, `"memory"`, or `"sqlite"`. `CacheSettings(enabled=True)` becomes

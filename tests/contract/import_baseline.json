@@ -19,6 +19,6 @@
     "penampakan_median_s": 0.1363,
     "control_median_s": 0.0217,
     "observed_ratio_range": [6.19, 6.39],
-    "note": "Editable install of penampakan 0.4.0 with Pillow and pydantic present. Re-record these numbers only together with an ADR explaining why the ratio changed."
+    "note": "Editable install of penampakan 0.5.0 with Pillow and pydantic present. Re-record these numbers only together with an ADR explaining why the ratio changed."
   }
 }
