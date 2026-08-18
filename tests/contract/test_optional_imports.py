@@ -48,6 +48,7 @@ def _run(body: str, blocked: tuple[str, ...] = _BLOCKED) -> str:
         [sys.executable, "-c", script],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     assert completed.returncode == 0, completed.stderr

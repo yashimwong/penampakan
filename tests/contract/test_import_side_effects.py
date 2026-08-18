@@ -51,6 +51,7 @@ def _run(body: str, *, cwd: Path | None = None, arguments: tuple[str, ...] = ())
         [sys.executable, *arguments, "-c", textwrap.dedent(body)],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
         cwd=None if cwd is None else str(cwd),
     )

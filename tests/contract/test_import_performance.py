@@ -53,6 +53,7 @@ def _median_seconds(statement: str, *, samples: int, warmups: int) -> float:
             [sys.executable, "-c", TIMER.format(statement=statement)],
             capture_output=True,
             text=True,
+            encoding="utf-8",
             check=False,
         )
         assert completed.returncode == 0, completed.stderr

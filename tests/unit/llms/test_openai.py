@@ -872,6 +872,7 @@ def test_module_imports_with_the_sdk_absent() -> None:
         [sys.executable, "-c", _IMPORT_PROBE],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 

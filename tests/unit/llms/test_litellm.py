@@ -699,6 +699,7 @@ def test_module_imports_and_types_without_the_litellm_package() -> None:
         [sys.executable, "-c", script],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
 

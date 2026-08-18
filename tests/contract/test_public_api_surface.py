@@ -92,6 +92,7 @@ def _run(body: str) -> str:
         [sys.executable, "-c", script],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
     )
     assert completed.returncode == 0, completed.stderr
@@ -362,6 +363,7 @@ def test_optional_classes_resolve_precisely_for_a_strict_type_checker(tmp_path: 
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
         check=False,
         cwd=tmp_path,
         env=environment,

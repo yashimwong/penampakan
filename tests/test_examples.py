@@ -84,6 +84,7 @@ def test_offline_example_subprocess(name: str, expected: tuple[str, ...], tmp_pa
         env=environment,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=20,
         check=False,
     )
@@ -124,6 +125,7 @@ def test_readme_quickstart_matches_example_and_executes(tmp_path: Path) -> None:
         env=_isolated_environment(),
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=20,
         check=False,
     )

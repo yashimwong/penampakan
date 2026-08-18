@@ -55,7 +55,9 @@ def test_github_anchors_include_duplicate_and_url_decoded_fragments(tmp_path: Pa
     )
 
     assert github_slug("Café & setup") == "café-setup"
-    assert markdown_anchors(document.read_text()) >= {"café-setup", "repeat", "repeat-1", "manual"}
+    anchors = markdown_anchors(document.read_text(encoding="utf-8"))
+
+    assert anchors >= {"café-setup", "repeat", "repeat-1", "manual"}
     assert validate_markdown(tmp_path, [source]) == []
 
 
