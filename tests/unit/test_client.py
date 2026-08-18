@@ -46,6 +46,7 @@ from penampakan.models import (
 from penampakan.perception.cache import MemoryLRUCache, NullCache, SingleFlightCoordinator
 from penampakan.perception.router import BackendRouter
 from penampakan.protocols import Cache, TraceSink
+from penampakan.reasoning import supported_prompt_versions
 from penampakan.session import AsyncVisionSession
 from tests.fixtures.images import encode_image
 from tests.unit.reasoning.helpers import ScriptedPolicy
@@ -257,6 +258,16 @@ async def test_constructor_configuration_validation() -> None:
         with pytest.raises(ConfigurationError) as captured:
             AsyncPenampakan(**arguments)
         assert captured.value.code == code
+
+
+async def test_constructor_accepts_every_supported_prompt_version() -> None:
+    for version in supported_prompt_versions():
+        settings = Settings(agent=AgentSettings(prompt_version=version))
+        client = AsyncPenampakan(settings=settings, llm=MinimalTextLLM())
+        try:
+            assert client.settings.agent.prompt_version == version
+        finally:
+            await client.aclose()
 
 
 async def test_settings_are_deep_snapshots_and_cache_selection_is_exact() -> None:

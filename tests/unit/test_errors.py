@@ -1,5 +1,6 @@
 from penampakan.errors import (
     BackendUnavailableError,
+    ConfigurationError,
     InspectionFailedError,
     InvalidImageError,
     PenampakanError,
@@ -26,6 +27,27 @@ def test_error_text_redacts_messages_and_causes() -> None:
     assert sentinel not in str(error)
     assert sentinel not in repr(error)
     assert error.cause_summary == "cause details redacted"
+
+
+def test_configuration_error_names_a_safe_extra_and_rejects_unsafe_text() -> None:
+    named = ConfigurationError(code="missing_optional_dependency", extra="ocr")
+
+    assert named.extra == "ocr"
+    assert "penampakan[ocr]" in str(named)
+    assert "extra='ocr'" in repr(named)
+
+    # Only a conservative token shape is reportable, so no free-form text can
+    # reach the public message through this field.
+    unsafe = ConfigurationError(code="missing_optional_dependency", extra="Not A Token")
+
+    assert unsafe.extra is None
+    assert "Not A Token" not in str(unsafe)
+    assert "Not A Token" not in repr(unsafe)
+
+    plain = ConfigurationError(code="invalid_llm")
+
+    assert plain.extra is None
+    assert str(plain) == "Penampakan configuration is invalid. [invalid_llm]"
 
 
 def test_invalid_custom_code_falls_back_to_stable_default() -> None:

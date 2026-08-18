@@ -35,7 +35,7 @@ from penampakan.perception.registry import ToolRegistry
 from penampakan.perception.router import BackendRouter
 from penampakan.protocols import ActionPolicy, Cache, TextLLM, TraceSink, VisionBackend
 from penampakan.reasoning.policy import JsonActionPolicy
-from penampakan.reasoning.prompts import PROMPT_VERSION
+from penampakan.reasoning.prompts import SUPPORTED_PROMPT_VERSIONS
 from penampakan.session import AsyncVisionSession
 from penampakan.tools.builtin import register_transform_tools
 from penampakan.tools.vision import register_vision_tools
@@ -109,7 +109,7 @@ class AsyncPenampakan:
             raise ConfigurationError(code="invalid_ownership")
         if owns_policy and policy is None:
             raise ConfigurationError(code="invalid_ownership")
-        if self._settings.agent.prompt_version != PROMPT_VERSION:
+        if self._settings.agent.prompt_version not in SUPPORTED_PROMPT_VERSIONS:
             raise ConfigurationError(code="unsupported_prompt_version")
         # The convenience path constructs the policy, so the client owns it and
         # cascades to the language model only when the caller handed ownership

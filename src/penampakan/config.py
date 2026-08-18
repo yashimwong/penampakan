@@ -12,6 +12,7 @@ else:
     from typing_extensions import Self
 
 from .models import Capability
+from .reasoning.prompts import PROMPT_VERSION
 
 _BACKEND_NAME = re.compile(r"^[a-z][a-z0-9_.-]{0,63}$")
 
@@ -90,7 +91,7 @@ class AgentSettings(_SettingsModel):
     fallback_backends: bool = True
     strict_evidence: bool = True
     max_identical_actions: int = Field(default=2, gt=0)
-    prompt_version: str = "agent-v1"
+    prompt_version: str = PROMPT_VERSION
 
     @field_validator("prompt_version")
     @classmethod

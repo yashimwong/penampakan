@@ -20,13 +20,18 @@ def test_backend_exports_are_lightweight() -> None:
 
     module = importlib.import_module("penampakan.backends")
 
-    assert module.__all__ == (
+    # Specification 05 D2: tests compare required inclusion, not equality, so a
+    # new backend export never breaks this gate.
+    expected = {
         "CallableVisionBackend",
         "PillowBackend",
         "TesseractBackend",
         "TransformersCaptionBackend",
         "TransformersDetectionBackend",
-    )
+    }
+
+    assert expected <= set(module.__all__)
+    assert all(hasattr(module, name) for name in module.__all__)
     assert optional_modules.isdisjoint(sys.modules)
 
 

@@ -3,8 +3,9 @@ import math
 import pytest
 from pydantic import ValidationError
 
-from penampakan.config import RunLimits, Settings, validate_timeout_s
+from penampakan.config import AgentSettings, RunLimits, Settings, validate_timeout_s
 from penampakan.models import Capability
+from penampakan.reasoning import PROMPT_VERSION, supported_prompt_versions
 
 
 def test_settings_defaults_are_isolated_and_immutable() -> None:
@@ -60,3 +61,11 @@ def test_settings_reject_unknown_and_coercive_values() -> None:
         RunLimits(max_steps="8")
     with pytest.raises(ValidationError):
         Settings.model_validate({"unknown": True})
+
+
+def test_agent_settings_default_prompt_version_tracks_canonical_constant() -> None:
+    default = AgentSettings().prompt_version
+
+    assert default == PROMPT_VERSION
+    assert default in supported_prompt_versions()
+    assert Settings().agent.prompt_version == PROMPT_VERSION

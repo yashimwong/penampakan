@@ -18,6 +18,7 @@ except ModuleNotFoundError:
     import tomli as tomllib
 
 _BLOCKED = ("openai", "anthropic", "litellm")
+_BLOCKED_BACKENDS = ("pytesseract", "torch", "transformers", "huggingface_hub")
 
 _BLOCKER = """
 import sys
@@ -41,8 +42,8 @@ sys.meta_path.insert(0, _BlockProviders())
 """
 
 
-def _run(body: str) -> str:
-    script = _BLOCKER.format(blocked=set(_BLOCKED)) + textwrap.dedent(body)
+def _run(body: str, blocked: tuple[str, ...] = _BLOCKED) -> str:
+    script = _BLOCKER.format(blocked=set(blocked)) + textwrap.dedent(body)
     completed = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True,
@@ -144,30 +145,107 @@ def test_documentation_and_type_introspection_work_without_provider_packages() -
 
 
 def test_constructing_an_adapter_reports_the_missing_extra() -> None:
+    # Specification 05 acceptance criterion 4: construction must fail with the
+    # correct extra name. The extra is a static library constant, so naming it is
+    # the one detail that makes the failure actionable; prompt, schema, and
+    # credential text stay redacted.
     output = _run(
         """
         from penampakan.errors import ConfigurationError
         from penampakan.llms import AnthropicTextLLM, LiteLLMTextLLM, OpenAITextLLM
 
         cases = (
-            (OpenAITextLLM, {"model": "gpt-4.1"}),
-            (AnthropicTextLLM, {"model": "claude-opus-5"}),
-            (LiteLLMTextLLM, {"model": "gpt-4o"}),
+            (OpenAITextLLM, {"model": "gpt-4.1"}, "openai"),
+            (AnthropicTextLLM, {"model": "claude-opus-5"}, "anthropic"),
+            (LiteLLMTextLLM, {"model": "gpt-4o"}, "litellm"),
         )
-        codes = []
-        for factory, options in cases:
+        reported = []
+        for factory, options, extra in cases:
             try:
                 factory(**options)
             except ConfigurationError as error:
-                codes.append(error.code)
-                assert "openai" not in str(error)
-                assert "anthropic" not in str(error)
+                assert error.code == "missing_optional_dependency", error.code
+                assert error.extra == extra, error.extra
+                assert f"penampakan[{extra}]" in str(error), str(error)
+                assert options["model"] not in str(error)
+                assert error.cause_summary == "cause details redacted"
+                reported.append(f"{error.code}:{error.extra}")
             else:
                 raise AssertionError(factory.__name__)
-        print(",".join(codes))
+        print(",".join(reported))
         """
     )
-    assert output.strip() == ",".join(["missing_optional_dependency"] * 3)
+    assert output.strip() == (
+        "missing_optional_dependency:openai,"
+        "missing_optional_dependency:anthropic,"
+        "missing_optional_dependency:litellm"
+    )
+
+
+def test_optional_backend_modules_import_without_their_packages() -> None:
+    output = _run(
+        """
+        import importlib
+
+        for name in ("penampakan.backends.tesseract", "penampakan.backends.transformers"):
+            importlib.import_module(name)
+        from penampakan.backends import (
+            TesseractBackend,
+            TransformersCaptionBackend,
+            TransformersDetectionBackend,
+        )
+
+        print(",".join(
+            item.__name__
+            for item in (
+                TesseractBackend,
+                TransformersCaptionBackend,
+                TransformersDetectionBackend,
+            )
+        ))
+        """,
+        blocked=_BLOCKED_BACKENDS,
+    )
+    assert output.strip() == (
+        "TesseractBackend,TransformersCaptionBackend,TransformersDetectionBackend"
+    )
+
+
+def test_constructing_an_optional_backend_reports_the_missing_extra() -> None:
+    output = _run(
+        """
+        import sys
+
+        from penampakan.backends import (
+            TesseractBackend,
+            TransformersCaptionBackend,
+            TransformersDetectionBackend,
+        )
+        from penampakan.errors import ConfigurationError
+
+        cases = (
+            (TesseractBackend, "ocr"),
+            (TransformersCaptionBackend, "transformers"),
+            (TransformersDetectionBackend, "transformers"),
+        )
+        reported = []
+        for factory, extra in cases:
+            try:
+                factory()
+            except ConfigurationError as error:
+                assert error.code == "missing_optional_dependency", error.code
+                assert error.extra == extra, error.extra
+                assert f"penampakan[{extra}]" in str(error), str(error)
+                reported.append(error.extra)
+            else:
+                raise AssertionError(factory.__name__)
+        # A failed construction must not have loaded any heavyweight package.
+        assert {"torch", "transformers", "huggingface_hub"}.isdisjoint(sys.modules)
+        print(",".join(reported))
+        """,
+        blocked=_BLOCKED_BACKENDS,
+    )
+    assert output.strip() == "ocr,transformers,transformers"
 
 
 def test_the_schema_compiler_works_without_any_provider_package() -> None:

@@ -49,10 +49,25 @@ python -m pip install 'penampakan[providers]'
 The OCR extra installs the Python adapter; the Tesseract executable must also
 be available on the system.
 
-Provider packages stay optional. Every adapter class imports on a base install,
-so `from penampakan.llms import OpenAITextLLM` always succeeds; only
+Optional packages stay optional. Every adapter class imports on a base install,
+so `from penampakan.llms import OpenAITextLLM` and
+`from penampakan.backends import TesseractBackend` always succeed; only
 constructing an adapter without its extra raises
-`ConfigurationError(code="missing_optional_dependency")`.
+`ConfigurationError(code="missing_optional_dependency")`, which names the extra
+on `ConfigurationError.extra` and in its message as `Install penampakan[ocr].`.
+Importing Penampakan never loads model weights, reads credentials, opens a
+connection, writes a file, or configures logging.
+
+## Public API surface
+
+`penampakan` itself holds the clients, settings, contracts, errors, protocols,
+and base-install construction helpers used by the happy path. Advanced APIs live
+in documented namespaces — `penampakan.backends`, `penampakan.llms`,
+`penampakan.evaluation`, `penampakan.image`, `penampakan.perception.cache`,
+`penampakan.reasoning`, `penampakan.reasoning.policy`, and `penampakan.tracing`
+— and anything beginning with `_` is private. See
+[public contracts](docs/contracts.md) for the semantic-versioning, deprecation,
+JSON Schema, and prompt-version policies that each tier carries.
 
 ## Quick start
 

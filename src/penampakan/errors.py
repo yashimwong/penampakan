@@ -68,6 +68,43 @@ class ConfigurationError(PenampakanError):
     default_code = "configuration_error"
     default_message = "Penampakan configuration is invalid."
 
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        code: str | None = None,
+        trace_id: UUID | None = None,
+        backend_name: str | None = None,
+        tool_name: str | None = None,
+        retryable: bool | None = None,
+        cause: BaseException | None = None,
+        cause_summary: str | None = None,
+        extra: str | None = None,
+    ) -> None:
+        # The installable extra is a static library constant, never caller data,
+        # so naming it is the one detail a configuration failure must report for
+        # the caller to be able to fix it.
+        self.extra = extra if extra is not None and _SAFE_TOKEN.fullmatch(extra) else None
+        super().__init__(
+            message,
+            code=code,
+            trace_id=trace_id,
+            backend_name=backend_name,
+            tool_name=tool_name,
+            retryable=retryable,
+            cause=cause,
+            cause_summary=cause_summary,
+        )
+        if self.extra is not None:
+            self.safe_message = f"{self.safe_message} Install penampakan[{self.extra}]."
+            self.args = (self.safe_message,)
+
+    def __repr__(self) -> str:
+        rendered = super().__repr__()
+        if self.extra is None:
+            return rendered
+        return f"{rendered[:-1]}, extra={self.extra!r})"
+
 
 class ImageError(PenampakanError):
     """Base class for image loading and normalization failures."""

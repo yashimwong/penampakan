@@ -1,0 +1,24 @@
+{
+  "description": "Import-performance envelope for `import penampakan` (specification 05 D4). The recorded medians are machine-relative documentation only; the enforced contract is the penampakan/control ratio plus an absolute emergency ceiling, so the test does not become a fixed wall-clock assertion across arbitrary hardware.",
+  "measurement": "median of `samples` fresh-subprocess `import penampakan` timings (time.perf_counter inside the child), after discarding `warmup_samples` runs",
+  "control_statement": "import json, asyncio",
+  "control_rationale": "A stdlib-only import of comparable weight, measured in the same job with the same harness. It absorbs interpreter, filesystem, and CPU speed differences between machines, so the ratio stays stable while a real regression (a provider SDK, Torch, eager weight loading) moves it by an order of magnitude.",
+  "samples": 7,
+  "warmup_samples": 1,
+  "retry_attempts": 3,
+  "baseline_ratio": 6.3,
+  "relative_tolerance": 2.5,
+  "tolerance_rationale": "Allows the observed ratio to grow to 15.75x before failing. Five consecutive calibration runs on the recording machine spanned 6.19x-6.39x, so the headroom is roughly 2.5x the healthy value; importing Torch or a provider SDK costs hundreds of milliseconds to seconds and pushes the ratio far beyond it.",
+  "emergency_ceiling_s": 3.0,
+  "emergency_ceiling_rationale": "Absolute backstop for a catastrophic regression, about 22x the recorded median. Generous enough that a slow, heavily loaded CI runner never trips it on healthy code.",
+  "recorded_on": {
+    "date": "2026-08-18",
+    "python_version": "3.13.15",
+    "platform": "Linux-6.18.33.2-microsoft-standard-WSL2-x86_64-with-glibc2.43",
+    "machine": "x86_64",
+    "penampakan_median_s": 0.1363,
+    "control_median_s": 0.0217,
+    "observed_ratio_range": [6.19, 6.39],
+    "note": "Editable install of penampakan 0.2.1 with Pillow and pydantic present. Re-record these numbers only together with an ADR explaining why the ratio changed."
+  }
+}

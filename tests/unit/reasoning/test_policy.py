@@ -12,6 +12,7 @@ from penampakan.models import (
     SchemaEnforcement,
     ToolAction,
 )
+from penampakan.reasoning import supported_prompt_versions
 from penampakan.reasoning.actions import ActionParseError
 from penampakan.reasoning.policy import JsonActionPolicy
 from tests.unit.reasoning.helpers import ScriptedTextLLM, make_policy_input
@@ -161,6 +162,14 @@ def test_policy_constructor_rejects_unsupported_prompt_and_output_limit() -> Non
         JsonActionPolicy(llm, prompt_version="agent-v2")
     with pytest.raises(ValueError, match="positive"):
         JsonActionPolicy(llm, max_output_tokens=0)
+
+
+def test_policy_accepts_every_supported_prompt_version() -> None:
+    llm = ScriptedTextLLM([])
+
+    for version in supported_prompt_versions():
+        policy = JsonActionPolicy(llm, prompt_version=version)
+        assert policy.prompt_version == version
 
 
 class _ClosableTextLLM(ScriptedTextLLM):

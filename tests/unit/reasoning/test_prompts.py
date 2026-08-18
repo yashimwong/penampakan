@@ -7,6 +7,7 @@ from penampakan.reasoning import supported_prompt_versions
 from penampakan.reasoning.prompts import (
     AGENT_V1_SYSTEM_PROMPT,
     PROMPT_VERSION,
+    SUPPORTED_PROMPT_VERSIONS,
     answer_only_stop_reason,
     build_action_schema,
     build_policy_request,
@@ -150,3 +151,13 @@ def test_policy_request_preserves_generation_contract() -> None:
     assert request.timeout_s == 12.0
     assert request.max_output_tokens == 321
     assert request.metadata["prompt_version"] == PROMPT_VERSION
+
+
+def test_supported_prompt_versions_is_the_canonical_immutable_tuple() -> None:
+    versions = supported_prompt_versions()
+
+    assert isinstance(versions, tuple)
+    assert PROMPT_VERSION in versions
+    assert versions is SUPPORTED_PROMPT_VERSIONS
+    assert versions == SUPPORTED_PROMPT_VERSIONS
+    assert supported_prompt_versions() == versions

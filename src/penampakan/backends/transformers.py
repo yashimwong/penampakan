@@ -16,6 +16,7 @@ from typing import Protocol, TypeVar, cast
 from PIL import Image
 from PIL.Image import Image as PillowImage
 
+from penampakan.backends._optional import require_extra
 from penampakan.errors import (
     BackendError,
     BackendUnavailableError,
@@ -485,6 +486,7 @@ class TransformersCaptionBackend(_TransformersBackend):
         local_files_only: bool = False,
         generation_kwargs: Mapping[str, JsonValue] | None = None,
     ) -> None:
+        require_extra("transformers", "transformers", "torch")
         selected_model = _clean_identifier(model_id, "model_id")
         selected_revision = _clean_optional_identifier(revision, "revision")
         selected_device = _validate_device(device)
@@ -567,6 +569,7 @@ class TransformersDetectionBackend(_TransformersBackend):
         device: str | int | None = None,
         local_files_only: bool = False,
     ) -> None:
+        require_extra("transformers", "transformers", "torch")
         selected_model = _clean_identifier(model_id, "model_id")
         selected_revision = _clean_optional_identifier(revision, "revision")
         selected_device = _validate_device(device)

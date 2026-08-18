@@ -18,6 +18,14 @@ from penampakan.models import (
 
 PROMPT_VERSION = "agent-v1"
 
+# Behavioral-compatibility set: every prompt version whose exact prompt and
+# schema behavior this release still selects. It is the canonical source for
+# ``penampakan.reasoning.supported_prompt_versions()`` and for the
+# ``AgentSettings.prompt_version`` default, so no other module duplicates the
+# literal. An older version stays listed until its documented deprecation
+# expires; the first entry is the current default.
+SUPPORTED_PROMPT_VERSIONS: tuple[str, ...] = (PROMPT_VERSION,)
+
 AGENT_V1_SYSTEM_PROMPT = "\n".join(
     (
         "You are the decision policy for a visual tool orchestrator. Follow every rule below.",
@@ -369,6 +377,7 @@ def build_policy_request(
 __all__ = [
     "AGENT_V1_SYSTEM_PROMPT",
     "PROMPT_VERSION",
+    "SUPPORTED_PROMPT_VERSIONS",
     "answer_only_stop_reason",
     "build_action_schema",
     "build_policy_request",

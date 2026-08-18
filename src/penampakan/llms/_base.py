@@ -31,9 +31,17 @@ _SCHEMA_CACHE_LIMIT: Final = 8
 
 
 def missing_dependency(package: str) -> ConfigurationError:
-    """Return the actionable error for an absent optional provider package."""
+    """Return the actionable error for an absent optional provider package.
+
+    Each provider package is distributed by the identically named extra, so the
+    reported extra is the package name.
+    """
     # The package name is a static library constant, never caller data.
-    return ConfigurationError(code="missing_optional_dependency", cause_summary=package)
+    return ConfigurationError(
+        code="missing_optional_dependency",
+        cause_summary=package,
+        extra=package,
+    )
 
 
 class SchemaCompilerCache:

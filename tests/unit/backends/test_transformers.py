@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import importlib.machinery
+import importlib.util
 import sys
 import threading
 from collections.abc import Iterator
@@ -18,7 +20,7 @@ from penampakan.backends.transformers import (
     TransformersCaptionBackend,
     TransformersDetectionBackend,
 )
-from penampakan.errors import BackendUnavailableError
+from penampakan.errors import BackendUnavailableError, ConfigurationError
 from penampakan.models import (
     BackendImage,
     Box,
@@ -106,6 +108,23 @@ def _install(monkeypatch: pytest.MonkeyPatch, runtime: FakeRuntime) -> list[str]
 
     monkeypatch.setattr(importlib, "import_module", load)
     return imports
+
+
+def _hide_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, package=None: None)
+
+
+@pytest.fixture(autouse=True)
+def _installed_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report the optional Transformers extra as installed without importing it."""
+    located = importlib.util.find_spec
+
+    def find_spec(name: str, package: str | None = None) -> object:
+        if name in {"transformers", "torch"}:
+            return importlib.machinery.ModuleSpec(name, None)
+        return located(name, package)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
 
 
 def test_construction_and_discovery_are_lazy_and_descriptors_are_exact(
@@ -456,6 +475,33 @@ def test_resolved_revision_survives_hub_changes_after_construction(
 
     assert backend.descriptor == backend.descriptor
     assert backend.descriptor.model_revision == _CAPTION_COMMIT
+
+
+@pytest.mark.parametrize(
+    "factory",
+    (TransformersCaptionBackend, TransformersDetectionBackend),
+)
+def test_construction_without_the_extra_reports_the_missing_extra(
+    monkeypatch: pytest.MonkeyPatch,
+    factory: type[TransformersCaptionBackend] | type[TransformersDetectionBackend],
+) -> None:
+    _hide_extra(monkeypatch)
+
+    def unexpected(name: str) -> object:
+        raise AssertionError(name)
+
+    monkeypatch.setattr(importlib, "import_module", unexpected)
+
+    with pytest.raises(ConfigurationError) as raised:
+        factory()
+
+    assert raised.value.code == "missing_optional_dependency"
+    # The installable extra is named on a dedicated safe field and in the public
+    # message, exactly like the optional provider adapters, while the free-form
+    # cause summary stays redacted.
+    assert raised.value.extra == "transformers"
+    assert "penampakan[transformers]" in str(raised.value)
+    assert raised.value.cause_summary == "cause details redacted"
 
 
 @pytest.mark.asyncio

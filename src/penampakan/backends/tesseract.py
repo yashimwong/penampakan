@@ -18,6 +18,7 @@ from typing import Protocol, cast
 from PIL import Image
 from PIL.Image import Image as PillowImage
 
+from penampakan.backends._optional import require_extra
 from penampakan.errors import (
     BackendUnavailableError,
     InvalidBackendOutputError,
@@ -126,6 +127,7 @@ class TesseractBackend:
         config: str = "",
         max_concurrency: int = 2,
     ) -> None:
+        require_extra("ocr", "pytesseract")
         self._executable = self._validate_executable(executable)
         self._languages = self._validate_languages(languages)
         self._config = self._validate_config(config)

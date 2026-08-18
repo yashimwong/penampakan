@@ -4,14 +4,22 @@ The public API has three tiers:
 
 1. `penampakan` contains the clients, common settings, data contracts, errors,
    protocols, and base-install construction helpers used by the happy path.
-2. Documented namespaces contain stable advanced APIs, including
-   `penampakan.backends`, `penampakan.llms`, `penampakan.evaluation`,
-   `penampakan.perception.cache`, and `penampakan.reasoning`.
+2. Documented namespaces contain stable advanced APIs: `penampakan.backends`,
+   `penampakan.llms`, `penampakan.evaluation`, `penampakan.image`,
+   `penampakan.perception.cache`, `penampakan.reasoning`,
+   `penampakan.reasoning.policy`, and `penampakan.tracing`. Adding a backend,
+   provider, cache, evaluator, parser, prompt helper, or trace sink extends the
+   namespace that owns it rather than the top level, so tier 1 stays small
+   enough to remain discoverable.
 3. A module or name beginning with `_` is private and has no compatibility
-   promise.
+   promise. So is any module not named above: `penampakan.perception` and
+   `penampakan.tools` are package containers that deliberately export nothing,
+   and their unlisted submodules are implementation detail.
 
-The definitive symbol list is each module's `__all__`; signatures and model
-fields are defined by code and docstrings rather than duplicated here. The
+The definitive symbol list is each module's `__all__`; every tier-1 and tier-2
+module defines one explicitly, and an absent or empty `__all__` is an intentional
+statement that the module exports nothing. Signatures and model fields are
+defined by code and docstrings rather than duplicated here. The
 [top-level exports](../src/penampakan/__init__.py),
 [domain models](../src/penampakan/models.py), and
 [protocol definitions](../src/penampakan/protocols.py) are the maintained
@@ -61,23 +69,36 @@ Application functions can be adapted with `CallableTextLLM` and
 `CallableVisionBackend`. Implementations must return the exact typed result;
 core normalization treats backend drafts and model text as untrusted input.
 
-Optional adapter classes can be imported on a base installation. Constructing
-one without its declared extra raises
-`ConfigurationError(code="missing_optional_dependency")`; importing the package
-never reads provider credentials. Supported imports and extras are:
+Every optional adapter class can be imported on a base installation, because no
+adapter module imports its optional third-party package at module import time.
+Constructing one without its declared extra raises
+`ConfigurationError(code="missing_optional_dependency")`, which names the extra
+on `ConfigurationError.extra` and in its public message as
+`Install penampakan[<extra>].`. The extra is a static library constant, so it is
+the one detail a configuration failure reports verbatim; prompt, schema, and
+credential text stay redacted. Importing the package never reads credentials,
+opens a connection, writes a file, loads model weights, or configures global
+logging or telemetry.
 
-| API | Import path | Extra / side effect at construction |
-| --- | --- | --- |
-| Pillow and callable backends | `penampakan.backends` | Base; no credentials or model loading |
-| Tesseract backend | `penampakan.backends` | `ocr`; Python dependency and system executable are checked on first analysis |
-| Transformers backends | `penampakan.backends` | `transformers`; local model loading starts on first analysis |
-| Callable text LLM | `penampakan.llms` | Base; wraps caller code |
-| OpenAI / Anthropic / LiteLLM adapters | `penampakan.llms` | Corresponding provider extra; SDK client construction may resolve SDK configuration from the environment |
-| Metrics | `penampakan.evaluation` | Base; experimental pure diagnostics |
-| Process-local cache implementations | `penampakan.perception.cache` | Base; selected cache retains data until client close |
+| API | Import path | Extra | Construction side effects | Ownership |
+| --- | --- | --- | --- | --- |
+| Pillow and callable backends | `penampakan.backends` | Base | None | Caller-owned; `aclose` |
+| Tesseract backend | `penampakan.backends` | `ocr` | The `ocr` extra is verified; the system executable and language data are diagnosed on first analysis | Caller-owned; `aclose` |
+| Transformers backends | `penampakan.backends` | `transformers` | The `transformers` extra is verified and the model revision is resolved; weights load on first analysis | Caller-owned; `aclose` |
+| Callable text LLM | `penampakan.llms` | Base | Wraps caller code | Caller-owned; `aclose` and async context manager |
+| OpenAI / Anthropic / LiteLLM adapters | `penampakan.llms` | Matching provider extra | SDK client construction may resolve SDK configuration from the environment | Caller-owned unless `owns_llm=True`; async context manager |
+| Action policy | `penampakan.reasoning.policy` | Base | None; validates `prompt_version` against `supported_prompt_versions()` | Caller-owned unless `owns_policy=True`; closes its LLM only with `owns_llm=True` |
+| Prompt-version discovery | `penampakan.reasoning` | Base | None; pure functions and constants | Not applicable |
+| Metrics | `penampakan.evaluation` | Base | None; experimental pure diagnostics | Not applicable |
+| Image loading and geometry | `penampakan.image` | Base | None; pure functions over caller data | Returned assets are plain values |
+| Trace building and redaction | `penampakan.tracing` | Base | None; a builder holds only run-local state | Owned by the run that created it; caller-supplied `TraceSink`s stay caller-owned |
+| Process-local cache implementations | `penampakan.perception.cache` | Base | None | Owned by the client that receives it; retains data until client close |
 
-See [Architecture: resource ownership](architecture.md#resource-ownership) for
-context-manager and close behavior.
+A tier-2 name is subject to the same semantic-versioning and deprecation rules
+as a tier-1 name. See
+[Architecture: resource ownership](architecture.md#resource-ownership) for the
+full context-manager and close ordering rules; no shared adapter or external SDK
+client is ever closed implicitly.
 
 ## Evidence contract
 

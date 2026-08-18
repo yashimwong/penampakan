@@ -15,6 +15,43 @@
   metadata and distribution-content release gates.
 - Recorded the existing metadata orchestration-overhead result in an immutable
   manifest and clarified that smoke/contract checks are not accuracy evidence.
+- Documented the tiered public API surface. `penampakan.image`,
+  `penampakan.reasoning.policy`, and `penampakan.tracing` join the listed stable
+  advanced namespaces, each namespace now records its import path, extra,
+  construction side effects, and ownership, and `penampakan.perception` and
+  `penampakan.tools` declare an intentionally empty `__all__` so their
+  submodules are unambiguously implementation detail.
+- Constructing `TesseractBackend`, `TransformersCaptionBackend`, or
+  `TransformersDetectionBackend` without its extra now raises
+  `ConfigurationError(code="missing_optional_dependency")` immediately, matching
+  the optional provider adapters, instead of deferring a
+  `BackendUnavailableError` to first analysis. The check locates the packages
+  without importing them, so no weights load and construction stays cheap; the
+  deferred unavailability path is retained for a package that disappears or
+  breaks after construction.
+- `ConfigurationError` now reports the installable extra on a new `extra`
+  attribute and in its public message as `Install penampakan[<extra>].`. The
+  extra is a static library constant validated against the same conservative
+  token shape as other reported identifiers, so prompt, schema, and credential
+  text remain redacted. A missing-dependency failure previously named no extra
+  at all, because the free-form cause summary is redacted by design.
+- `AgentSettings.prompt_version` now defaults to the canonical `PROMPT_VERSION`
+  rather than a duplicated literal, and the client and `JsonActionPolicy`
+  validate against `supported_prompt_versions()` membership instead of a single
+  constant. `JsonActionPolicy.prompt_version` reports the version it was
+  configured with rather than the module default.
+- Added public API surface contract tests: every README import resolves from the
+  path shown, the base-install top-level and advanced namespace imports hold with
+  every optional package hidden, `dir()` and star imports are checked by required
+  inclusion rather than exact equality, a checked-in export snapshot gates
+  removals against the deprecation policy, and optional classes resolve
+  precisely under a real strict type-checker run.
+- Added import side-effect and import-performance regression gates. A base import
+  is asserted to load no Torch, Transformers, Tesseract, provider SDK, or
+  OpenTelemetry module and to perform no filesystem, network, credential, or
+  global logging activity. Import cost is compared against a checked-in envelope
+  calibrated by a control measurement taken in the same job, plus an absolute
+  emergency ceiling, rather than a fixed wall-clock assertion.
 
 ## Penampakan 0.2.1
 Released 2026-08-18

@@ -16,7 +16,11 @@ from penampakan.models import (
 from penampakan.protocols import TextLLM
 from penampakan.reasoning._metrics import record_policy_response
 from penampakan.reasoning.actions import ActionParseError, parse_policy_action
-from penampakan.reasoning.prompts import PROMPT_VERSION, build_policy_request
+from penampakan.reasoning.prompts import (
+    PROMPT_VERSION,
+    SUPPORTED_PROMPT_VERSIONS,
+    build_policy_request,
+)
 
 _DEGRADED_SCHEMA_ENFORCEMENT = WarningInfo(
     code="degraded_schema_enforcement",
@@ -43,7 +47,7 @@ class JsonActionPolicy:
         temperature: float = 0.0,
         owns_llm: bool = False,
     ) -> None:
-        if prompt_version != PROMPT_VERSION:
+        if prompt_version not in SUPPORTED_PROMPT_VERSIONS:
             raise ValueError("unsupported prompt version")
         if isinstance(max_output_tokens, bool) or max_output_tokens <= 0:
             raise ValueError("max_output_tokens must be positive")
@@ -52,6 +56,7 @@ class JsonActionPolicy:
         if not isinstance(owns_llm, bool):
             raise TypeError("owns_llm must be a bool")
         self._llm = llm
+        self._prompt_version = prompt_version
         self._timeout_s = timeout_s
         self._max_output_tokens = max_output_tokens
         self._temperature = float(temperature)
@@ -61,8 +66,8 @@ class JsonActionPolicy:
 
     @property
     def prompt_version(self) -> str:
-        """Return the immutable prompt interface version."""
-        return PROMPT_VERSION
+        """Return the immutable prompt interface version selected at construction."""
+        return self._prompt_version
 
     @property
     def owns_llm(self) -> bool:

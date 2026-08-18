@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import importlib
+import importlib.machinery
+import importlib.util
 import threading
 from collections.abc import Mapping, Sequence
 from io import BytesIO
@@ -12,7 +14,11 @@ import pytest
 from PIL import Image
 
 from penampakan.backends.tesseract import TesseractBackend
-from penampakan.errors import BackendUnavailableError, SessionClosedError
+from penampakan.errors import (
+    BackendUnavailableError,
+    ConfigurationError,
+    SessionClosedError,
+)
 from penampakan.models import (
     BackendImage,
     Box,
@@ -111,6 +117,23 @@ def _install(monkeypatch: pytest.MonkeyPatch, fake: object) -> None:
     monkeypatch.setattr(importlib, "import_module", lambda name: fake)
 
 
+def _hide_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, package=None: None)
+
+
+@pytest.fixture(autouse=True)
+def _installed_extra(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report the optional OCR extra as installed without importing it."""
+    located = importlib.util.find_spec
+
+    def find_spec(name: str, package: str | None = None) -> object:
+        if name == "pytesseract":
+            return importlib.machinery.ModuleSpec(name, None)
+        return located(name, package)
+
+    monkeypatch.setattr(importlib.util, "find_spec", find_spec)
+
+
 def test_construction_and_capability_discovery_do_not_import_optional_extra(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -141,6 +164,28 @@ def test_construction_and_capability_discovery_do_not_import_optional_extra(
     assert backend.supports(OCRRequest(languages=("deu",)))
     assert not backend.supports(OCRRequest(languages=("fra",)))
     assert not backend.supports(CaptionRequest())
+
+
+def test_construction_without_the_extra_reports_the_missing_extra(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _hide_extra(monkeypatch)
+
+    def unexpected(name: str) -> object:
+        raise AssertionError(name)
+
+    monkeypatch.setattr(importlib, "import_module", unexpected)
+
+    with pytest.raises(ConfigurationError) as raised:
+        TesseractBackend()
+
+    assert raised.value.code == "missing_optional_dependency"
+    # The installable extra is named on a dedicated safe field and in the public
+    # message, exactly like the optional provider adapters, while the free-form
+    # cause summary stays redacted.
+    assert raised.value.extra == "ocr"
+    assert "penampakan[ocr]" in str(raised.value)
+    assert raised.value.cause_summary == "cause details redacted"
 
 
 @pytest.mark.asyncio
