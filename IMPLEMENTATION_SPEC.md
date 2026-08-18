@@ -11,10 +11,11 @@ native multimodal model. The goal is to be the best provider-neutral,
 inspectable, local-capable visual evidence layer for text LLMs, with explicit
 budgets, provenance, abstention, and no execution of model-generated code.
 
-The normative improvement roadmap is indexed in
-[`specs/README.md`](specs/README.md). The individual documents in `specs/` are
-the implementation requirements. No normative link in this repository may point
-to a missing file.
+The normative improvement roadmap is indexed in `specs/README.md`, and the
+individual documents in `specs/` are the implementation requirements. That
+directory is a local working area excluded by `.gitignore`, so it is referenced
+by path rather than linked: no normative link in this repository may point to a
+file that is missing from a fresh checkout.
 
 User-facing documentation describes only shipped behavior and is maintained in:
 
