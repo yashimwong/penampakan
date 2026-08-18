@@ -1,6 +1,15 @@
 # Changelog
 
-## [Unreleased]
+## Penampakan 0.3.0
+Released 2026-08-18
+
+Breaking: constructing `TesseractBackend`, `TransformersCaptionBackend`, or
+`TransformersDetectionBackend` without its extra now fails immediately instead
+of succeeding and deferring a `BackendUnavailableError` to first analysis. Code
+that constructed an optional backend to probe availability must catch
+`ConfigurationError` at the construction site. `ConfigurationError` messages for
+a missing dependency also changed, and `JsonActionPolicy.prompt_version` now
+reports the version it was configured with rather than the module default.
 
 - Added maintained product, architecture, contract, runtime, and quality guides
   grounded in the shipped public API.
