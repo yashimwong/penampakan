@@ -53,13 +53,24 @@ text, model output, and final answers each require a distinct
 and other secrets remain excluded regardless of those flags. See
 [Runtime: tracing and retention](runtime.md#tracing-and-retention).
 
-Trace redaction and perception caching are independent controls. The default
-cache retains nothing. The optional built-in memory cache retains validated
-perception-result JSON only for the life of the client process and clears it on
-close. A caller-supplied durable cache may retain OCR text, captions, and other
-image-derived observations; selecting or administering that store is the
-caller's responsibility. Enabling trace content never enables caching, and
-enabling caching never changes trace redaction.
+Trace redaction and perception caching are independent controls: enabling trace
+content never enables a cache, and enabling a cache never changes trace
+redaction. Retention is off by default — `CacheSettings.mode` defaults to `off`
+and every retaining mode is selected explicitly.
+
+A cache retains validated perception-result JSON, which can contain OCR text,
+captions, and detected labels read out of a user image. Treat that derived text
+as at least as sensitive as the image itself. `mode="memory"` holds it only for
+the life of the client process and clears it on close. `mode="sqlite"` holds it
+on disk at the configured path until entries expire or are cleared, and that
+content is **not encrypted**: the database and its `-wal`/`-shm` sidecars are
+readable by anyone who can read those files, so an encrypted filesystem or volume
+is the recommended way to obtain at-rest confidentiality. Clearing a durable
+cache is logical removal, not secure erasure — it promises nothing about database
+pages, the write-ahead log, SSD wear levelling, backups, or filesystem snapshots.
+A caller-supplied cache is the caller's retention decision entirely. See
+[Runtime: perception caching](runtime.md#perception-caching) for stored fields,
+key dimensions, TTL semantics, filesystem artifacts, and permission handling.
 
 Answer citations are **structural evidence**: the cited observation existed in
 the session, was visible to the policy, was not a warning, and belongs to the

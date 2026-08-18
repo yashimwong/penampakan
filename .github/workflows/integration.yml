@@ -47,6 +47,6 @@ jobs:
           -e HF_HOME=/cache/huggingface
           -e HF_HUB_OFFLINE=1
           -e TRANSFORMERS_OFFLINE=1
-          -e PENAMPAKAN_REQUIRE_INTEGRATION=ocr,geometry,caption,detection,e2e
+          -e PENAMPAKAN_REQUIRE_INTEGRATION=ocr,geometry,caption,detection,e2e,cache
           penampakan-integration
           pytest -m integration tests/integration

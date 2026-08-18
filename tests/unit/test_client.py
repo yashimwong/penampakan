@@ -280,7 +280,7 @@ async def test_settings_are_deep_snapshots_and_cache_selection_is_exact() -> Non
     assert disabled.settings.backend_preferences == {}
     assert isinstance(disabled._cache, NullCache)
 
-    enabled_settings = Settings(cache=CacheSettings(enabled=True, max_entries=3, max_bytes=4096))
+    enabled_settings = Settings(cache=CacheSettings(mode="memory", max_entries=3, max_bytes=4096))
     enabled = AsyncPenampakan(settings=enabled_settings)
     assert isinstance(enabled._cache, MemoryLRUCache)
     assert enabled._cache.max_entries == 3

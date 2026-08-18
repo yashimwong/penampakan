@@ -6,15 +6,19 @@ The public API has three tiers:
    protocols, and base-install construction helpers used by the happy path.
 2. Documented namespaces contain stable advanced APIs: `penampakan.backends`,
    `penampakan.llms`, `penampakan.evaluation`, `penampakan.image`,
-   `penampakan.perception.cache`, `penampakan.reasoning`,
-   `penampakan.reasoning.policy`, and `penampakan.tracing`. Adding a backend,
+   `penampakan.perception.cache`, `penampakan.perception.sqlite_cache`,
+   `penampakan.reasoning`, `penampakan.reasoning.policy`, and
+   `penampakan.tracing`. Adding a backend,
    provider, cache, evaluator, parser, prompt helper, or trace sink extends the
    namespace that owns it rather than the top level, so tier 1 stays small
    enough to remain discoverable.
 3. A module or name beginning with `_` is private and has no compatibility
    promise. So is any module not named above: `penampakan.perception` and
    `penampakan.tools` are package containers that deliberately export nothing,
-   and their unlisted submodules are implementation detail.
+   and their unlisted submodules — routing, normalization, storage — are
+   implementation detail. `penampakan.perception.sqlite_cache` is the one
+   exception, listed above because an operator administering a durable cache has
+   to import the implementation from somewhere.
 
 The definitive symbol list is each module's `__all__`; every tier-1 and tier-2
 module defines one explicitly, and an absent or empty `__all__` is an intentional
@@ -63,7 +67,15 @@ The core protocols are intentionally small:
 - `VisionBackend.descriptor`, `supports`, `analyze`, and `aclose`
 - `ActionPolicy.next_action(PolicyInput)`
 - `Cache.get`, `set`, and `aclose`
+- `ManagedCache.stats`, `clear`, and `prune`, in addition to the `Cache` surface
 - `TraceSink.emit` and `aclose`
+
+A session only ever uses `Cache`, where a failure degrades to a miss or a no-op.
+`ManagedCache` is the administrative surface: it raises typed errors instead,
+because an operator who called `stats`, `clear`, or `prune` is misled by silent
+failure. `Cache.set` validates that the supplied `size` equals the length of the
+value, and an implementation persists the size it verified rather than the number
+it was given.
 
 Application functions can be adapted with `CallableTextLLM` and
 `CallableVisionBackend`. Implementations must return the exact typed result;
@@ -93,6 +105,7 @@ logging or telemetry.
 | Image loading and geometry | `penampakan.image` | Base | None; pure functions over caller data | Returned assets are plain values |
 | Trace building and redaction | `penampakan.tracing` | Base | None; a builder holds only run-local state | Owned by the run that created it; caller-supplied `TraceSink`s stay caller-owned |
 | Process-local cache implementations | `penampakan.perception.cache` | Base | None | Owned by the client that receives it; retains data until client close |
+| Durable SQLite cache | `penampakan.perception.sqlite_cache` | Base | Starts one worker thread, creates a private parent directory and database file, and opens the database; a path or data failure disables the instance instead of raising | Owned by the client that receives it; `aclose` drains queued work and stops the worker, but retained data outlives the process |
 
 A tier-2 name is subject to the same semantic-versioning and deprecation rules
 as a tier-1 name. See

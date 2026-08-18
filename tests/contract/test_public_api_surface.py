@@ -54,6 +54,7 @@ _NAMESPACES = (
     "penampakan.llms",
     "penampakan.perception",
     "penampakan.perception.cache",
+    "penampakan.perception.sqlite_cache",
     "penampakan.reasoning",
     "penampakan.tools",
     "penampakan.tracing",

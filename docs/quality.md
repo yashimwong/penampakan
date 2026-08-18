@@ -10,6 +10,12 @@
 | Integration | Real provider SDK surfaces, Tesseract, Transformers geometry, pinned weights, and end-to-end adapters | Pinned container, executable/model snapshots as applicable |
 | Examples/docs | Import safety, offline execution, public snippets, links, and package metadata | Offline examples must not use credentials or network |
 
+The durable perception cache requires SQLite 3.37 or later at runtime for its
+`STRICT` tables; an older interpreter build disables the cache instead of
+retaining anything, so its suite assumes a supported runtime. The cache's
+file-permission and symlink cases skip on platforms without POSIX modes or
+symbolic links.
+
 The fast pull-request suite excludes model, OCR, and provider integration markers
 and enforces at least 90% package coverage. Ruff, formatting, and strict mypy run
 for Python 3.10 through 3.13; Windows runs a base import and smoke suite. Provider

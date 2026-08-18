@@ -10,7 +10,7 @@ lifecycle, validation, and cancellation rules.
 | --- | --- | --- |
 | `client` / `sync` | Public one-shot calls, reusable sessions, lifecycle | Session and public protocols |
 | `session` / `reasoning` / `tools` | Bounded action loop, trusted context, evidence validation | Domain models, perception routing, asset/observation stores |
-| `perception` | Backend selection, normalization, cache keys, single-flight work | Public backend/cache protocols and domain models |
+| `perception` | Backend selection, normalization, cache keys, cache implementations, single-flight work | Public backend/cache protocols and domain models |
 | `image` | Bounded loading, canonicalization, safe transforms, asset lineage | Configuration and domain models |
 | `backends` / `llms` | Optional integrations and callable adapters | Public protocols and provider-neutral contracts |
 | `models` / `protocols` / `errors` / `config` | Stable contracts and settings | Pydantic and the standard library; no concrete provider/model packages |
@@ -52,10 +52,18 @@ Ownership follows constructor boundaries, not Python variable ownership:
   caller-owned unless that adapter's `owns_client` option transfers ownership.
 - A session owns its asset and observation stores and borrows the client's
   router, policy, cache, single-flight coordinator, and sinks.
+- The durable SQLite cache owns one dedicated worker thread that creates, uses,
+  and closes its connection; the event loop never touches that connection. The
+  cache owns its database file, not the data retained in it, which outlives the
+  process that wrote it.
 
 Client shutdown first drains active operations, then closes sessions,
 single-flight work, backends, an owned policy/LLM, the cache, and finally trace
-sinks. Cleanup is idempotent and attempts every owned resource. Ordinary close
+sinks. Cleanup is idempotent and attempts every owned resource. Closing the
+durable cache runs the work already queued ahead of the close, closes the
+connection on the thread that created it, and stops that thread; work queued
+after that point is reported to its caller as unreachable rather than left
+awaiting. Ordinary close
 failures become redacted `AsyncPenampakan.close_warnings`; cancellation and
 other base exceptions are retained until cleanup completes and are then
 propagated.

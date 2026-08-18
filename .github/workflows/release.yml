@@ -21,6 +21,14 @@ jobs:
           python-version: "3.13"
           cache: pip
       - run: python -m pip install -e '.[dev,providers]' -c requirements/provider-sdks.txt
+      - name: Record the SQLite runtime version
+        # Spec 07 D4: STRICT cache tables require SQLite 3.37+, and the durable
+        # cache disables itself below that. Recording the runtime version makes
+        # which path a job exercised visible in its log.
+        run: >-
+          python -c "import sqlite3;
+          print('sqlite_version', sqlite3.sqlite_version);
+          print('sqlite_version_info', sqlite3.sqlite_version_info)"
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy --strict src/penampakan

@@ -1,5 +1,68 @@
 # Changelog
 
+## Unreleased
+
+Breaking: `CacheSettings.enabled` is replaced by `CacheSettings.mode`, one of
+`"off"`, `"memory"`, or `"sqlite"`. `CacheSettings(enabled=True)` becomes
+`CacheSettings(mode="memory")`. A cache stores derived descriptions of user
+images, so retention is now selected explicitly rather than toggled, and it
+remains off by default. `Cache.set` also rejects an accounted `size` that
+disagrees with `len(value)`, and a value larger than the whole byte budget is
+now a true no-op that leaves any value already stored under that key intact
+instead of discarding it.
+
+- Added `SQLiteCache`, a retention-aware durable perception cache, selected with
+  `CacheSettings(mode="sqlite", path=...)`. One dedicated worker thread creates,
+  owns, and closes the SQLite connection and processes an ordered queue, so the
+  event loop never touches the connection and no operation can run on a thread
+  the connection does not belong to. The worker enables WAL and a bounded busy
+  timeout, uses short explicit transactions and idempotent upserts, retries lock
+  contention with bounded jitter only inside the operation deadline, and
+  converts exhausted contention into a degraded miss rather than a run failure.
+- The durable cache disables itself instead of failing client construction when
+  its database cannot be used, and reports why on `SQLiteCache.status`: a
+  runtime older than SQLite 3.37 cannot create `STRICT` tables
+  (`sqlite_version_unsupported`), a database written by a newer schema is opened
+  for no data so an older binary cannot drop future entries
+  (`cache_schema_too_new`), and an unusable path, a rejected symlink, or a
+  failed quarantine each disable the instance rather than overwrite anything.
+  A corrupt or non-database file is quarantined under a unique
+  `.corrupt-<timestamp>-<nonce>` name before a fresh database is created.
+- Durable cache entries expire on an absolute deadline measured from their
+  creation, are evicted by an approximate least-recently-used order that batches
+  access timestamps so a reader does not become a writer, and are bounded by
+  high and low watermarks that a single accepted write may exceed only once.
+  Retained byte totals are derived transactionally from verified value sizes.
+- Penampakan creates a cache directory with mode `0700` and its database, WAL,
+  and shared-memory files with mode `0600` where the platform supports POSIX
+  permissions, warns when existing permissions are broader, and refuses a
+  symlinked cache path unless `allow_symlink=True`. Cache content is not
+  encrypted, and `clear()` removes entries logically rather than securely.
+- Added the `ManagedCache` protocol and the `CacheStats` model for cache
+  administration. `stats`, `clear`, and `prune` raise typed errors rather than
+  failing silently, because an operator who calls them is owed an answer; the
+  session-facing `Cache` surface still degrades to a miss or a no-op.
+  `NullCache` and `MemoryLRUCache` implement it too.
+- A cache failure during perception now produces exactly one redacted
+  `cache_operation_failed` warning per call, plus a `cache_operation_failed`
+  trace event per failed operation and a new `TraceSummary.cache_failures`
+  counter. Only the error type and a library error code are reported; no cache
+  key, path, or exception text reaches a warning or a trace.
+- A perception result served by a shared in-flight population is no longer
+  attributed to the backend that was merely preferred. The population now
+  carries the cache key its serving descriptor reproduces, so a waiter that
+  finds a different key re-perceives instead of recording a cache hit against a
+  backend that never ran, while a waiter in any session whose key does match
+  still shares the result.
+- Documented what a cache stores, its content-addressed key dimensions, TTL and
+  approximate-recency semantics, its filesystem artifacts and permissions, its
+  lock-contention limits, and that image-derived text may be as sensitive as the
+  image itself. Enabling trace content never enables a cache, and enabling a
+  cache never weakens trace redaction.
+- Exported `CacheStats` and `ManagedCache` from the top level and documented
+  `penampakan.perception.sqlite_cache` as an advanced namespace. CI now records
+  the SQLite runtime version it ran against.
+
 ## Penampakan 0.4.0
 Released 2026-08-18
 

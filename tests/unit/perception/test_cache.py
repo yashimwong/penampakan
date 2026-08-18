@@ -6,8 +6,10 @@ from typing import cast
 
 import pytest
 
+from penampakan.errors import PenampakanError
 from penampakan.models import (
     BackendDescriptor,
+    CacheStats,
     Capability,
     CapabilityDescriptor,
     CaptionRequest,
@@ -22,6 +24,7 @@ from penampakan.perception.cache import (
     canonical_request_json,
     is_durable_cache,
 )
+from penampakan.protocols import ManagedCache
 
 
 def _backend(
@@ -133,73 +136,163 @@ async def test_caches_require_bytes_and_strict_positive_sizes() -> None:
 async def test_entry_eviction_uses_get_promotion_order() -> None:
     cache = MemoryLRUCache(max_entries=2, max_bytes=100)
 
-    await cache.set("first", b'{"value":1}', size=10)
-    await cache.set("second", b'{"value":2}', size=10)
+    await cache.set("first", b'{"value":1}', size=11)
+    await cache.set("second", b'{"value":2}', size=11)
     assert await cache.get("first") == b'{"value":1}'
-    await cache.set("third", b'{"value":3}', size=10)
+    await cache.set("third", b'{"value":3}', size=11)
 
     assert await cache.get("second") is None
     assert await cache.get("first") == b'{"value":1}'
     assert await cache.get("third") == b'{"value":3}'
     assert cache.entry_count == 2
-    assert cache.current_bytes == 20
+    assert cache.current_bytes == 22
 
 
 @pytest.mark.asyncio
 async def test_replacement_updates_size_and_promotes_entry() -> None:
+    # Every value below is sized by its own byte length, so the byte totals are
+    # driven by the payloads rather than by accounting the cache would reject.
     cache = MemoryLRUCache(max_entries=2, max_bytes=10)
 
-    await cache.set("first", b'{"value":1}', size=4)
-    await cache.set("second", b'{"value":2}', size=4)
-    await cache.set("first", b'{"value":3}', size=6)
+    await cache.set("first", b'"ab"', size=4)
+    await cache.set("second", b'"cd"', size=4)
+    await cache.set("first", b'"efgh"', size=6)
 
     assert cache.entry_count == 2
     assert cache.current_bytes == 10
-    assert await cache.get("first") == b'{"value":3}'
+    assert await cache.get("first") == b'"efgh"'
 
-    await cache.set("third", b'{"value":4}', size=1)
+    await cache.set("third", b"1", size=1)
 
     assert await cache.get("second") is None
-    assert await cache.get("first") == b'{"value":3}'
-    assert await cache.get("third") == b'{"value":4}'
+    assert await cache.get("first") == b'"efgh"'
+    assert await cache.get("third") == b"1"
     assert cache.current_bytes == 7
 
 
 @pytest.mark.asyncio
 async def test_byte_eviction_and_oversized_replacement_are_bounded() -> None:
+    # The byte limit is crossed by the third honestly sized value, not by a
+    # caller claiming a size its payload does not have.
     cache = MemoryLRUCache(max_entries=10, max_bytes=7)
 
-    await cache.set("first", b'{"value":1}', size=3)
-    await cache.set("second", b'{"value":2}', size=3)
-    await cache.set("third", b'{"value":3}', size=3)
+    await cache.set("first", b'"a"', size=3)
+    await cache.set("second", b'"b"', size=3)
+    await cache.set("third", b'"c"', size=3)
 
     assert await cache.get("first") is None
-    assert await cache.get("second") == b'{"value":2}'
-    assert await cache.get("third") == b'{"value":3}'
+    assert await cache.get("second") == b'"b"'
+    assert await cache.get("third") == b'"c"'
     assert cache.current_bytes == 6
 
-    await cache.set("second", b'{"value":4}', size=8)
+    # A value larger than the whole budget is a no-op: it neither displaces the
+    # good value already stored under its key nor evicts anything else.
+    await cache.set("second", b'"abcdef"', size=8)
 
-    assert await cache.get("second") is None
-    assert await cache.get("third") == b'{"value":3}'
-    assert cache.entry_count == 1
-    assert cache.current_bytes == 3
+    assert await cache.get("second") == b'"b"'
+    assert await cache.get("third") == b'"c"'
+    assert cache.entry_count == 2
+    assert cache.current_bytes == 6
 
 
 @pytest.mark.asyncio
 async def test_memory_cache_close_clears_and_disables_storage() -> None:
     cache = MemoryLRUCache(max_entries=2, max_bytes=20)
-    await cache.set("first", b'{"value":1}', size=10)
+    await cache.set("first", b'{"a":1234}', size=10)
 
     await cache.aclose()
     await cache.aclose()
-    await cache.set("second", b'{"value":2}', size=10)
+    await cache.set("second", b'{"b":5678}', size=10)
 
     assert cache.closed
     assert cache.entry_count == 0
     assert cache.current_bytes == 0
     assert await cache.get("first") is None
     assert await cache.get("second") is None
+
+
+@pytest.mark.asyncio
+async def test_caches_reject_caller_size_that_disagrees_with_the_value() -> None:
+    memory = MemoryLRUCache(max_entries=4, max_bytes=100)
+    null = NullCache()
+    value = b'{"value":1}'
+
+    for size in (len(value) - 1, len(value) + 1):
+        with pytest.raises(ValueError, match="byte length"):
+            await memory.set("mismatch", value, size=size)
+        with pytest.raises(ValueError, match="byte length"):
+            await null.set("mismatch", value, size=size)
+
+    assert await memory.get("mismatch") is None
+    assert memory.entry_count == 0
+    assert memory.current_bytes == 0
+    assert (await memory.stats()).total_bytes == 0
+
+
+def test_shipped_caches_are_discoverable_as_managed_caches() -> None:
+    assert isinstance(NullCache(), ManagedCache)
+    assert isinstance(MemoryLRUCache(), ManagedCache)
+    assert not isinstance(_ProtocolOnlyCache(), ManagedCache)
+
+
+@pytest.mark.asyncio
+async def test_null_cache_administration_reports_an_always_empty_snapshot() -> None:
+    cache = NullCache()
+    await cache.set("answer", b'{"value":1}', size=11)
+
+    snapshot = await cache.stats()
+
+    # A cache that never retains anything still has to declare positive limits,
+    # so it declares the smallest ones it is allowed to.
+    assert snapshot == CacheStats(entry_count=0, total_bytes=0, max_entries=1, max_bytes=1)
+
+    await cache.clear()
+    pruned = await cache.prune()
+
+    assert pruned == snapshot
+    assert (pruned.removed_entries, pruned.removed_bytes) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_memory_cache_administration_reports_verified_accounting() -> None:
+    cache = MemoryLRUCache(max_entries=4, max_bytes=64)
+    await cache.set("first", b'"ab"', size=4)
+    await cache.set("second", b'"cdef"', size=6)
+    populated = CacheStats(entry_count=2, total_bytes=10, max_entries=4, max_bytes=64)
+
+    assert await cache.stats() == populated
+
+    # Accepted writes already evict to the limits, so pruning a healthy cache
+    # discards nothing and keeps every entry readable.
+    assert await cache.prune() == populated
+    assert await cache.get("first") == b'"ab"'
+
+    await cache.clear()
+
+    assert await cache.stats() == CacheStats(
+        entry_count=0,
+        total_bytes=0,
+        max_entries=4,
+        max_bytes=64,
+    )
+    assert await cache.get("second") is None
+    assert not cache.closed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("build_cache", [NullCache, MemoryLRUCache])
+async def test_closed_caches_refuse_administration(
+    build_cache: Callable[[], ManagedCache],
+) -> None:
+    cache = build_cache()
+    await cache.aclose()
+
+    for administer in (cache.stats, cache.clear, cache.prune):
+        with pytest.raises(PenampakanError) as failure:
+            await administer()
+        assert failure.value.code == "cache_closed"
+
+    assert await cache.get("first") is None
 
 
 def test_canonical_request_json_is_compact_sorted_and_unicode_preserving() -> None:

@@ -3,6 +3,7 @@ from typing import Protocol, runtime_checkable
 from penampakan.models import (
     BackendDescriptor,
     BackendImage,
+    CacheStats,
     LLMRequest,
     LLMResponse,
     PolicyAction,
@@ -15,6 +16,7 @@ from penampakan.models import (
 __all__ = [
     "ActionPolicy",
     "Cache",
+    "ManagedCache",
     "TextLLM",
     "TraceSink",
     "VisionBackend",
@@ -91,6 +93,33 @@ class Cache(Protocol):
 
     async def aclose(self) -> None:
         """Release cache resources idempotently."""
+        ...
+
+
+@runtime_checkable
+class ManagedCache(Cache, Protocol):
+    """A cache that also exposes administration to an operator.
+
+    A session only ever uses the :class:`Cache` surface, where a failure
+    degrades to a miss or a no-op. These administrative operations instead
+    raise typed errors, because silently doing nothing would mislead the
+    operator who called them.
+    """
+
+    async def stats(self) -> CacheStats:
+        """Return a transactional snapshot of retained content."""
+        ...
+
+    async def clear(self) -> None:
+        """Remove every logical entry transactionally.
+
+        This is reclamation, not secure erasure: it promises nothing about
+        database pages, write-ahead logs, backups, or filesystem snapshots.
+        """
+        ...
+
+    async def prune(self) -> CacheStats:
+        """Drop expired and over-watermark entries and report the result."""
         ...
 
 

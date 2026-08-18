@@ -64,7 +64,8 @@ connection, writes a file, or configures logging.
 and base-install construction helpers used by the happy path. Advanced APIs live
 in documented namespaces — `penampakan.backends`, `penampakan.llms`,
 `penampakan.evaluation`, `penampakan.image`, `penampakan.perception.cache`,
-`penampakan.reasoning`, `penampakan.reasoning.policy`, and `penampakan.tracing`
+`penampakan.perception.sqlite_cache`, `penampakan.reasoning`,
+`penampakan.reasoning.policy`, and `penampakan.tracing`
 — and anything beginning with `_` is private. See
 [public contracts](docs/contracts.md) for the semantic-versioning, deprecation,
 JSON Schema, and prompt-version policies that each tier carries.
@@ -208,12 +209,15 @@ RGBA assets before a backend sees them.
 
 Penampakan currently supports one root image per session; ordered multi-image
 questions and aggregate image limits have not shipped. Trace redaction and cache
-retention are independent: trace content is excluded by default, the cache is
-off by default, and the built-in opt-in cache is process-local. A custom durable
-cache may retain sensitive OCR or caption content and is the caller's retention
-decision. Model-backed vision results are eligible for durable reuse only when
-the backend reports an exact model revision. See [runtime behavior](docs/runtime.md)
-for the trust boundary, budgets, trace schema, and retention details.
+retention are independent: trace content is excluded by default and
+`CacheSettings.mode` is `off` by default. `mode="memory"` retains perception
+results for the life of the client process; `mode="sqlite"` retains them on disk,
+unencrypted, until they expire or are cleared. Either mode — and any caller-supplied
+cache — may hold OCR text, captions, and other image-derived content, so choosing
+one is a retention decision. Model-backed vision results are eligible for durable
+reuse only when the backend reports an exact model revision. See
+[runtime behavior](docs/runtime.md#perception-caching) for stored fields, key
+dimensions, TTL, filesystem artifacts, and the limits of clearing a durable cache.
 
 Evidence citations are structural. The library proves that a cited observation
 was available in the current image lineage; it does not independently prove that
@@ -333,7 +337,7 @@ docker run --rm \
   -e HF_HOME=/cache/huggingface \
   -e HF_HUB_OFFLINE=1 \
   -e TRANSFORMERS_OFFLINE=1 \
-  -e PENAMPAKAN_REQUIRE_INTEGRATION=ocr,geometry,caption,detection,e2e \
+  -e PENAMPAKAN_REQUIRE_INTEGRATION=ocr,geometry,caption,detection,e2e,cache \
   penampakan-integration pytest -m integration tests/integration
 ```
 

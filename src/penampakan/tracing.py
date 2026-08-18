@@ -62,6 +62,7 @@ REQUIRED_EVENT_TYPES = frozenset(
         "backend_call_started",
         "backend_call_finished",
         "cache_hit",
+        "cache_operation_failed",
         "asset_created",
         "observations_committed",
         "budget_stop",
@@ -294,6 +295,7 @@ class TraceBuilder:
         self._tool_calls = 0
         self._backend_calls = 0
         self._cache_hits = 0
+        self._cache_failures = 0
         self._derived_assets = 0
         self._input_tokens: int | None = None
         self._output_tokens: int | None = None
@@ -380,6 +382,10 @@ class TraceBuilder:
             self._backend_calls += 1
         elif event.event_type == "cache_hit":
             self._cache_hits += 1
+        elif event.event_type == "cache_operation_failed":
+            # A degraded cache operation is a miss or a no-op, never a run
+            # failure, so the counter is the only place it is aggregated.
+            self._cache_failures += 1
         elif event.event_type == "asset_created":
             self._derived_assets += 1
         if event.event_type == "policy_call_finished":
@@ -503,6 +509,7 @@ class TraceBuilder:
             tool_calls=self._tool_calls,
             backend_calls=self._backend_calls,
             cache_hits=self._cache_hits,
+            cache_failures=self._cache_failures,
             derived_assets=self._derived_assets,
             input_tokens=self._input_tokens,
             output_tokens=self._output_tokens,

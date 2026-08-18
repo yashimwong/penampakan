@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 import re
 import sys
+from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -71,11 +73,34 @@ class TraceContentPolicy(_SettingsModel):
 
 
 class CacheSettings(_SettingsModel):
-    """Configuration for the optional bounded in-memory cache."""
+    """Retention configuration for the optional perception cache.
 
-    enabled: bool = False
+    A cache stores derived descriptions of user images, including OCR text and
+    captions, so it is a content retention feature rather than a pure
+    optimization. Retention is therefore off by default and is selected
+    explicitly: ``memory`` retains within this process, ``sqlite`` retains on
+    disk across processes. This setting is independent of
+    :class:`TraceContentPolicy`; enabling trace content never enables a cache
+    and enabling a cache never changes trace redaction.
+    """
+
+    mode: Literal["off", "memory", "sqlite"] = "off"
+    path: Path | None = None
     max_entries: int = Field(default=256, gt=0)
     max_bytes: int = Field(default=128 * 1024 * 1024, gt=0)
+    ttl_s: float | None = Field(default=None, gt=0, allow_inf_nan=False)
+    busy_timeout_s: float = Field(default=5.0, gt=0, allow_inf_nan=False)
+    allow_symlink: bool = False
+
+    @model_validator(mode="after")
+    def validate_path_matches_mode(self) -> Self:
+        """Require a path for durable retention and reject one otherwise."""
+        if self.mode == "sqlite":
+            if self.path is None:
+                raise ValueError("path is required when mode is 'sqlite'")
+        elif self.path is not None:
+            raise ValueError("path is only valid when mode is 'sqlite'")
+        return self
 
 
 class AgentSettings(_SettingsModel):

@@ -11,9 +11,15 @@ from contextlib import suppress
 from dataclasses import dataclass
 from typing import ClassVar, Generic, TypeVar
 
-from ..models import JSON_VALUE_ADAPTER, BackendDescriptor, VisionRequest
+from ..errors import PenampakanError
+from ..models import JSON_VALUE_ADAPTER, BackendDescriptor, CacheStats, VisionRequest
 
 CACHE_SCHEMA_VERSION = "perception-cache-v1"
+
+# ``CacheStats`` limits must be positive, so a cache that can never retain
+# anything reports the smallest limit it is allowed to declare rather than a
+# capacity it would never honour.
+_EMPTY_CACHE_LIMIT = 1
 
 
 def canonical_request_json(request: VisionRequest) -> bytes:
@@ -87,26 +93,59 @@ class NullCache:
     async def get(self, key: str) -> bytes | None:
         """Always return a cache miss."""
 
-        _validate_key(key)
+        validate_key(key)
         return None
 
     async def set(self, key: str, value: bytes, *, size: int) -> None:
         """Validate and discard a cache value."""
 
-        _validate_key(key)
-        _validate_size(size)
-        _validate_json_bytes(value)
+        validate_key(key)
+        validate_json_bytes(value)
+        validate_accounted_size(size, value)
 
     async def aclose(self) -> None:
         """Close the disabled cache idempotently."""
 
         self._closed = True
 
+    async def stats(self) -> CacheStats:
+        """Return the always-empty snapshot of a cache that never retains values.
+
+        ``CacheStats`` requires positive limits, so a capacity of zero cannot be
+        reported. The smallest positive limits are used instead: claiming a
+        larger capacity would advertise headroom this cache does not have, while
+        one entry and one byte describe the least a cache may declare and are
+        already unreachable here, because every accepted value is discarded.
+        """
+
+        self._require_open()
+        return CacheStats(
+            entry_count=0,
+            total_bytes=0,
+            max_entries=_EMPTY_CACHE_LIMIT,
+            max_bytes=_EMPTY_CACHE_LIMIT,
+        )
+
+    async def clear(self) -> None:
+        """Remove every retained entry, of which there are never any."""
+
+        self._require_open()
+
+    async def prune(self) -> CacheStats:
+        """Report that a cache retaining nothing has nothing to discard."""
+
+        self._require_open()
+        return await self.stats()
+
     @property
     def closed(self) -> bool:
         """Return whether close has been requested."""
 
         return self._closed
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise _closed_cache_error()
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,8 +174,8 @@ class MemoryLRUCache:
         max_entries: int = 256,
         max_bytes: int = 128 * 1024 * 1024,
     ) -> None:
-        self._max_entries = _validate_positive_limit("max_entries", max_entries)
-        self._max_bytes = _validate_positive_limit("max_bytes", max_bytes)
+        self._max_entries = validate_positive_limit("max_entries", max_entries)
+        self._max_bytes = validate_positive_limit("max_bytes", max_bytes)
         self._entries: OrderedDict[str, _CacheEntry] = OrderedDict()
         self._total_bytes = 0
         self._lock = asyncio.Lock()
@@ -145,7 +184,7 @@ class MemoryLRUCache:
     async def get(self, key: str) -> bytes | None:
         """Return a value and promote it to most recently used."""
 
-        _validate_key(key)
+        validate_key(key)
         async with self._lock:
             if self._closed:
                 return None
@@ -158,17 +197,19 @@ class MemoryLRUCache:
     async def set(self, key: str, value: bytes, *, size: int) -> None:
         """Store validated JSON bytes and evict least-recently-used entries."""
 
-        _validate_key(key)
-        accounted_size = _validate_size(size)
-        copied_value = _validate_json_bytes(value)
+        validate_key(key)
+        copied_value = validate_json_bytes(value)
+        accounted_size = validate_accounted_size(size, copied_value)
         async with self._lock:
             if self._closed:
+                return
+            if accounted_size > self._max_bytes:
+                # A value that can never fit is a no-op, so it must not discard
+                # the entry already stored under this key.
                 return
             replaced = self._entries.pop(key, None)
             if replaced is not None:
                 self._total_bytes -= replaced.size
-            if accounted_size > self._max_bytes:
-                return
             self._entries[key] = _CacheEntry(copied_value, accounted_size)
             self._total_bytes += accounted_size
             self._evict()
@@ -182,6 +223,40 @@ class MemoryLRUCache:
             self._closed = True
             self._entries.clear()
             self._total_bytes = 0
+
+    async def stats(self) -> CacheStats:
+        """Return a snapshot of the accounting this cache verified itself."""
+
+        async with self._lock:
+            if self._closed:
+                raise _closed_cache_error()
+            return self._snapshot()
+
+    async def clear(self) -> None:
+        """Remove every entry while holding the lock, so no reader sees a partial clear."""
+
+        async with self._lock:
+            if self._closed:
+                raise _closed_cache_error()
+            self._entries.clear()
+            self._total_bytes = 0
+
+    async def prune(self) -> CacheStats:
+        """Evict down to the configured limits and report what was discarded.
+
+        Every accepted write already evicts to the same limits, so a healthy
+        cache reports no removals here; ``prune`` exists so an operator can
+        confirm that rather than assume it.
+        """
+
+        async with self._lock:
+            if self._closed:
+                raise _closed_cache_error()
+            removed_entries, removed_bytes = self._evict()
+            return self._snapshot(
+                removed_entries=removed_entries,
+                removed_bytes=removed_bytes,
+            )
 
     @property
     def max_entries(self) -> int:
@@ -213,10 +288,25 @@ class MemoryLRUCache:
 
         return self._closed
 
-    def _evict(self) -> None:
+    def _snapshot(self, *, removed_entries: int = 0, removed_bytes: int = 0) -> CacheStats:
+        return CacheStats(
+            entry_count=len(self._entries),
+            total_bytes=self._total_bytes,
+            max_entries=self._max_entries,
+            max_bytes=self._max_bytes,
+            removed_entries=removed_entries,
+            removed_bytes=removed_bytes,
+        )
+
+    def _evict(self) -> tuple[int, int]:
+        removed_entries = 0
+        removed_bytes = 0
         while len(self._entries) > self._max_entries or self._total_bytes > self._max_bytes:
             _, removed = self._entries.popitem(last=False)
             self._total_bytes -= removed.size
+            removed_entries += 1
+            removed_bytes += removed.size
+        return removed_entries, removed_bytes
 
 
 _ValueT = TypeVar("_ValueT")
@@ -245,7 +335,7 @@ class SingleFlightCoordinator(Generic[_ValueT]):
     ) -> _ValueT:
         """Return the shared population result without propagating waiter cancellation."""
 
-        _validate_key(key)
+        validate_key(key)
         async with self._lock:
             if self._closed:
                 raise RuntimeError("single-flight coordinator is closed")
@@ -310,17 +400,38 @@ def _consume_future(future: asyncio.Future[_ValueT]) -> None:
         future.exception()
 
 
-def _validate_positive_limit(name: str, value: int) -> int:
+def _closed_cache_error() -> PenampakanError:
+    # Administration is operator-facing, so a closed cache says so instead of
+    # answering with an empty snapshot that a live but empty cache would also
+    # produce. No cache-specific error class exists yet; the safe base error
+    # carries the distinguishing code.
+    return PenampakanError(code="cache_closed")
+
+
+def validate_positive_limit(name: str, value: int) -> int:
+    """Return a strictly positive integer bound, rejecting booleans and zero."""
+
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
 
 
-def _validate_size(size: int) -> int:
-    return _validate_positive_limit("size", size)
+def validate_accounted_size(size: int, value: bytes) -> int:
+    """Return the verified byte size, rejecting caller accounting that disagrees.
+
+    An implementation persists the size it computed here, never the number the
+    caller passed, so retained byte totals cannot be skewed by a wrong count.
+    """
+
+    accounted = validate_positive_limit("size", size)
+    if accounted != len(value):
+        raise ValueError("size must equal the byte length of value")
+    return len(value)
 
 
-def _validate_key(key: str) -> str:
+def validate_key(key: str) -> str:
+    """Return a canonical cache key, rejecting empty or NUL-bearing text."""
+
     if not isinstance(key, str) or not key or "\x00" in key:
         raise ValueError("cache key must be a non-empty NUL-free string")
     return key
@@ -340,7 +451,9 @@ def _validate_component(name: str, value: str) -> str:
     return value
 
 
-def _validate_json_bytes(value: bytes) -> bytes:
+def validate_json_bytes(value: bytes) -> bytes:
+    """Return a private copy of strict UTF-8 JSON bytes a cache may retain."""
+
     if not isinstance(value, bytes):
         raise TypeError("cache value must be bytes")
     try:
@@ -377,4 +490,8 @@ __all__ = [
     "build_perception_cache_key",
     "canonical_request_json",
     "is_durable_cache",
+    "validate_accounted_size",
+    "validate_json_bytes",
+    "validate_key",
+    "validate_positive_limit",
 ]

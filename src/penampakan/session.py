@@ -36,6 +36,7 @@ from penampakan.models import (
     InspectionOperation,
     InspectionPlan,
     InspectionResult,
+    JsonValue,
     MetadataRequest,
     Observation,
     ObservationDraft,
@@ -80,6 +81,71 @@ _UNRESOLVED_REVISION_MESSAGE = (
     "The exact model weight revision is unresolved; pin an immutable "
     "commit revision for reproducible inference and durable caching."
 )
+# Spec 07 D2: a cache is an optimization, so a failing one still degrades to a
+# miss or a no-op. The degradation stays observable through one warning per
+# perception call and one trace event per failed operation; a permanently broken
+# cache would otherwise be indistinguishable from a cold one.
+_CACHE_FAILURE_CODE = "cache_operation_failed"
+_CACHE_FAILURE_MESSAGE = "A cache operation failed; this perception ran without caching."
+_CACHE_FAILURE_EVENT = "cache_operation_failed"
+# A waiter that shares another caller's population needs the key that population
+# actually produced. The map is bounded because a long-lived session may perceive
+# unboundedly many distinct requests, and a dropped entry only costs one extra
+# perception rather than a wrong attribution.
+
+
+@dataclass(slots=True)
+class _CacheDegradation:
+    """Collect one perception call's cache failures into a single safe signal.
+
+    Only the exception type name and a library error code are stable enough to be
+    safe identifiers; free-form exception text, cache keys, cache values, and
+    cache paths never reach a warning or a trace event.
+    """
+
+    failed_operations: int = 0
+    error_type: str | None = None
+    error_code: str | None = None
+
+    def record(self, error: Exception) -> None:
+        """Count one failed cache operation and retain its redacted identity."""
+        self.failed_operations += 1
+        if self.error_type is not None:
+            return
+        self.error_type = type(error).__name__
+        if isinstance(error, PenampakanError):
+            self.error_code = error.code
+
+    def warnings(self) -> tuple[WarningInfo, ...]:
+        """Return the at-most-one warning this perception call reports."""
+        if self.failed_operations == 0:
+            return ()
+        details: dict[str, JsonValue] = {"failed_operations": self.failed_operations}
+        if self.error_type is not None:
+            details["error_type"] = self.error_type
+        if self.error_code is not None:
+            details["error_code"] = self.error_code
+        return (
+            WarningInfo(
+                code=_CACHE_FAILURE_CODE,
+                message=_CACHE_FAILURE_MESSAGE,
+                details=details,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SharedPerception:
+    """One population's bytes together with the cache key its producer reproduces.
+
+    A single flight is keyed by the first candidate backend's cache key, but the
+    population may fall back to another backend. Carrying the produced key in the
+    shared value lets every waiter — in this session or any other sharing the
+    client's coordinator — verify attribution against what actually ran.
+    """
+
+    encoded: bytes
+    produced_key: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,7 +182,7 @@ class AsyncVisionSession:
         tools: ToolRegistry,
         policy: ActionPolicy | None,
         cache: Cache,
-        singleflight: SingleFlightCoordinator[bytes],
+        singleflight: SingleFlightCoordinator[SharedPerception],
         settings: Settings,
         trace_sinks: Sequence[TraceSink] = (),
         load_warnings: Sequence[WarningInfo] = (),
@@ -1235,18 +1301,15 @@ class AsyncVisionSession:
         backend_name: str | None = None,
     ) -> _PerceptionOutcome:
         image = self._assets.backend_image(asset_id)
+        digest = image.asset.digest_sha256
         candidates = self._router.route(request, backend_name=backend_name)
         first = candidates[0]
-        cache_key = build_perception_cache_key(
-            asset_digest_sha256=image.asset.digest_sha256,
-            request=request,
-            backend=first,
-            preprocessing_version=_PREPROCESSING_VERSION,
-        )
+        cache_key = self._perception_cache_key(digest, request, first)
         cache_warning: WarningInfo | None = None
+        degradation = _CacheDegradation()
         durable = is_durable_cache(self._cache)
         allowed = self._cache_allowed(durable, first)
-        cached = await self._safe_cache_get(cache_key) if allowed else None
+        cached = await self._safe_cache_get(cache_key, degradation, trace) if allowed else None
         if cached is not None:
             try:
                 result = normalize_backend_result(
@@ -1260,6 +1323,12 @@ class AsyncVisionSession:
                     message="An invalid cached perception result was ignored.",
                 )
             else:
+                # Spec 07 D7: provenance may name only a descriptor that
+                # reproduces the key which served these bytes. Here that holds by
+                # construction, because ``cache_key`` was derived from ``first``
+                # and ``first`` is the descriptor credited below. The check that
+                # can actually fail is on the shared-flight path, where another
+                # backend may have populated the value.
                 await trace.emit(
                     "cache_hit",
                     {"asset_id": asset_id, "backend_name": first.name},
@@ -1274,6 +1343,7 @@ class AsyncVisionSession:
                 warnings = self._with_unresolved_revision_warning(
                     first,
                     (
+                        *degradation.warnings(),
                         *result.warnings,
                         *self._empty_result_warnings(request, result),
                     ),
@@ -1281,7 +1351,7 @@ class AsyncVisionSession:
                 return _PerceptionOutcome(asset_id, result, provenance, warnings)
         route_result: RouteResult | None = None
 
-        async def populate() -> bytes:
+        async def populate() -> SharedPerception:
             nonlocal route_result
 
             async def before_attempt(descriptor: BackendDescriptor) -> None:
@@ -1309,17 +1379,19 @@ class AsyncVisionSession:
                 limits=self._normalization_limits(),
             )
             encoded = normalized.model_dump_json(exclude_none=True).encode("utf-8")
-            actual_key = build_perception_cache_key(
-                asset_digest_sha256=image.asset.digest_sha256,
-                request=request,
-                backend=route_result.descriptor,
-                preprocessing_version=_PREPROCESSING_VERSION,
-            )
+            actual_key = self._perception_cache_key(digest, request, route_result.descriptor)
             if self._cache_allowed(durable, route_result.descriptor):
-                await self._safe_cache_set(actual_key, encoded)
-            return encoded
+                await self._safe_cache_set(actual_key, encoded, degradation, trace)
+            return SharedPerception(encoded=encoded, produced_key=actual_key)
 
-        encoded = await self._singleflight.run(cache_key, populate)
+        shared = await self._singleflight.run(cache_key, populate)
+        if route_result is None and shared.produced_key != cache_key:
+            # Spec 07 D7: a shared population served these bytes from a descriptor
+            # that does not reproduce this key, so it fell back to another backend.
+            # Re-perceive rather than let cache_hit mask which backend actually
+            # produced the observations.
+            shared = await populate()
+        encoded = shared.encoded
         result = normalize_backend_result(
             VisionResult.model_validate_json(encoded, strict=True),
             request,
@@ -1350,6 +1422,7 @@ class AsyncVisionSession:
             descriptor,
             (
                 *((cache_warning,) if cache_warning is not None else ()),
+                *degradation.warnings(),
                 *route_warnings,
                 *result.warnings,
                 *self._empty_result_warnings(request, result),
@@ -1367,6 +1440,25 @@ class AsyncVisionSession:
     @staticmethod
     def _cache_allowed(durable: bool, descriptor: BackendDescriptor) -> bool:
         return not durable or descriptor.durable_cache_eligible
+
+    @staticmethod
+    def _perception_cache_key(
+        digest: str,
+        request: VisionRequest,
+        descriptor: BackendDescriptor,
+    ) -> str:
+        """Return the canonical key for one descriptor's view of this perception.
+
+        The key is a digest, so its dimensions cannot be read back out of it. Every
+        provenance check therefore recomputes the key from the descriptor it is
+        about to credit and compares the two digests.
+        """
+        return build_perception_cache_key(
+            asset_digest_sha256=digest,
+            request=request,
+            backend=descriptor,
+            preprocessing_version=_PREPROCESSING_VERSION,
+        )
 
     @staticmethod
     def _with_unresolved_revision_warning(
@@ -1392,21 +1484,59 @@ class AsyncVisionSession:
             *warnings,
         )
 
-    async def _safe_cache_get(self, key: str) -> bytes | None:
+    async def _safe_cache_get(
+        self,
+        key: str,
+        degradation: _CacheDegradation,
+        trace: TraceBuilder,
+    ) -> bytes | None:
+        """Read a cached value, degrading a failing cache to a reported miss."""
         try:
             return await self._cache.get(key)
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as error:
+            await self._record_cache_failure("get", error, degradation, trace)
             return None
 
-    async def _safe_cache_set(self, key: str, value: bytes) -> None:
+    async def _safe_cache_set(
+        self,
+        key: str,
+        value: bytes,
+        degradation: _CacheDegradation,
+        trace: TraceBuilder,
+    ) -> None:
+        """Store a value, degrading a failing cache to a reported no-op."""
         try:
             await self._cache.set(key, value, size=len(value))
         except asyncio.CancelledError:
             raise
-        except Exception:
-            return
+        except Exception as error:
+            await self._record_cache_failure("set", error, degradation, trace)
+
+    async def _record_cache_failure(
+        self,
+        operation: str,
+        error: Exception,
+        degradation: _CacheDegradation,
+        trace: TraceBuilder,
+    ) -> None:
+        """Count one degraded cache operation and trace its redacted identity.
+
+        The trace carries one event per failed operation, so the run counters read
+        the failures the same way they read cache hits. The caller-visible warning
+        is aggregated instead: a perception call reports the degradation once,
+        however many of its cache operations failed.
+        """
+        degradation.record(error)
+        await trace.emit(
+            _CACHE_FAILURE_EVENT,
+            {
+                "operation": operation,
+                "error_type": type(error).__name__,
+                "error_code": error.code if isinstance(error, PenampakanError) else None,
+            },
+        )
 
     def _provenance(
         self,

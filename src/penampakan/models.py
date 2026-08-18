@@ -542,6 +542,23 @@ class WarningInfo(_FrozenModel):
         return _json_mapping(value)
 
 
+class CacheStats(_FrozenModel):
+    """A transactional snapshot of one managed cache's retained content.
+
+    ``entry_count`` and ``total_bytes`` are derived inside the same transaction
+    that produced them, from verified value sizes rather than caller-supplied
+    accounting. ``removed_entries`` and ``removed_bytes`` report what a
+    ``prune`` call discarded; ``stats`` leaves them at zero.
+    """
+
+    entry_count: Annotated[int, Field(ge=0)]
+    total_bytes: Annotated[int, Field(ge=0)]
+    max_entries: Annotated[int, Field(gt=0)]
+    max_bytes: Annotated[int, Field(gt=0)]
+    removed_entries: Annotated[int, Field(ge=0)] = 0
+    removed_bytes: Annotated[int, Field(ge=0)] = 0
+
+
 class Observation(_FrozenModel):
     """An immutable, attributable observation attached to a session asset."""
 
@@ -600,6 +617,7 @@ class TraceSummary(_FrozenModel):
     tool_calls: Annotated[int, Field(ge=0)]
     backend_calls: Annotated[int, Field(ge=0)]
     cache_hits: Annotated[int, Field(ge=0)]
+    cache_failures: Annotated[int, Field(ge=0)] = 0
     derived_assets: Annotated[int, Field(ge=0)]
     input_tokens: Annotated[int, Field(ge=0)] | None = None
     output_tokens: Annotated[int, Field(ge=0)] | None = None
@@ -946,6 +964,7 @@ __all__ = [
     "BackendDescriptor",
     "BackendImage",
     "Box",
+    "CacheStats",
     "Capability",
     "CapabilityDescriptor",
     "CaptionPayload",

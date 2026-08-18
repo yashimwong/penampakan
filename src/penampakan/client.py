@@ -33,10 +33,11 @@ from penampakan.models import (
 from penampakan.perception.cache import MemoryLRUCache, NullCache, SingleFlightCoordinator
 from penampakan.perception.registry import ToolRegistry
 from penampakan.perception.router import BackendRouter
+from penampakan.perception.sqlite_cache import SQLiteCache
 from penampakan.protocols import ActionPolicy, Cache, TextLLM, TraceSink, VisionBackend
 from penampakan.reasoning.policy import JsonActionPolicy
 from penampakan.reasoning.prompts import SUPPORTED_PROMPT_VERSIONS
-from penampakan.session import AsyncVisionSession
+from penampakan.session import AsyncVisionSession, SharedPerception
 from penampakan.tools.builtin import register_transform_tools
 from penampakan.tools.vision import register_vision_tools
 
@@ -147,7 +148,9 @@ class AsyncPenampakan:
                 authoritative_backends={Capability.METADATA: pillow.descriptor.name},
             )
             self._tools = self._build_tools(self._router)
-            self._singleflight: SingleFlightCoordinator[bytes] = SingleFlightCoordinator()
+            self._singleflight: SingleFlightCoordinator[SharedPerception] = (
+                SingleFlightCoordinator()
+            )
             self._sessions: set[AsyncVisionSession] = set()
             self._state_lock = asyncio.Lock()
             self._idle = asyncio.Event()
@@ -559,11 +562,30 @@ class AsyncPenampakan:
 
     @staticmethod
     def _default_cache(settings: Settings) -> Cache:
-        if not settings.cache.enabled:
+        """Build the cache the configured retention mode selects.
+
+        Retention is opt-in, so an unset mode yields a cache that never stores
+        anything. A durable cache that cannot open its database degrades to a
+        disabled instance rather than failing client construction; its reason
+        is observable on the instance.
+        """
+        cache = settings.cache
+        if cache.mode == "off":
             return NullCache()
-        return MemoryLRUCache(
-            max_entries=settings.cache.max_entries,
-            max_bytes=settings.cache.max_bytes,
+        if cache.mode == "memory":
+            return MemoryLRUCache(
+                max_entries=cache.max_entries,
+                max_bytes=cache.max_bytes,
+            )
+        if cache.path is None:  # pragma: no cover - the settings validator forbids it
+            raise ConfigurationError(code="invalid_cache")
+        return SQLiteCache(
+            cache.path,
+            max_entries=cache.max_entries,
+            max_bytes=cache.max_bytes,
+            ttl_s=cache.ttl_s,
+            busy_timeout_s=cache.busy_timeout_s,
+            allow_symlink=cache.allow_symlink,
         )
 
     @staticmethod

@@ -17,6 +17,7 @@ from penampakan.errors import (
     BackendUnavailableError,
     ContextLimitExceededError,
     InspectionFailedError,
+    PenampakanError,
     SessionClosedError,
 )
 from penampakan.models import (
@@ -1176,6 +1177,270 @@ async def test_durable_cache_bypass_keeps_single_flight_deduplication(
     assert len(result.observations) == 3
     assert cache.gets == []
     assert cache.sets == []
+
+
+_CACHE_FAILURE = "cache_operation_failed"
+_CACHE_CANARY = "canary-cache-secret-8d41"
+_RESOLVED_REVISION = "a" * 40
+
+
+class _FailingCache(_RecordingCache):
+    """A recording cache whose selected operations raise a leaky failure."""
+
+    def __init__(
+        self,
+        *,
+        fail_get: bool = False,
+        fail_set: bool = False,
+        error: BaseException | None = None,
+    ) -> None:
+        super().__init__(durable=False)
+        self._fail_get = fail_get
+        self._fail_set = fail_set
+        self._error = error
+
+    def _fail(self, key: str) -> None:
+        if self._error is not None:
+            raise self._error
+        raise RuntimeError(f"{_CACHE_CANARY} while reaching /var/cache/{key}")
+
+    async def get(self, key: str) -> bytes | None:
+        if self._fail_get:
+            self.gets.append(key)
+            self._fail(key)
+        return await super().get(key)
+
+    async def set(self, key: str, value: bytes, *, size: int) -> None:
+        if self._fail_set:
+            self.sets.append(key)
+            self._fail(key)
+        await super().set(key, value, size=size)
+
+
+@pytest.mark.asyncio
+async def test_a_failing_cache_get_degrades_to_one_reported_miss(image_bytes: bytes) -> None:
+    backend = _ModelCaptionBackend(model_revision=_RESOLVED_REVISION)
+    cache = _FailingCache(fail_get=True)
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        cache=cache,
+        settings=_settings(()),
+    ) as client:
+        result = await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    assert backend.calls == 1
+    assert len(result.observations) == 1
+    assert result.observations[0].provenance.cache_hit is False
+    assert [warning.code for warning in result.warnings] == [_CACHE_FAILURE]
+    assert result.warnings[0].details == {
+        "error_type": "RuntimeError",
+        "failed_operations": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_failing_cache_set_degrades_to_one_reported_no_op(image_bytes: bytes) -> None:
+    backend = _ModelCaptionBackend(model_revision=_RESOLVED_REVISION)
+    cache = _FailingCache(fail_set=True)
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        cache=cache,
+        settings=_settings(()),
+    ) as client:
+        result = await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    assert backend.calls == 1
+    assert len(cache.gets) == 1
+    assert len(cache.sets) == 1
+    assert len(result.observations) == 1
+    assert [warning.code for warning in result.warnings] == [_CACHE_FAILURE]
+    assert result.warnings[0].details["failed_operations"] == 1
+
+
+@pytest.mark.asyncio
+async def test_two_failing_cache_operations_report_exactly_one_warning(
+    image_bytes: bytes,
+) -> None:
+    backend = _ModelCaptionBackend(model_revision=_RESOLVED_REVISION)
+    cache = _FailingCache(fail_get=True, fail_set=True)
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        cache=cache,
+        settings=_settings(()),
+    ) as client:
+        result = await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    codes = [warning.code for warning in result.warnings]
+    assert codes == [_CACHE_FAILURE]
+    assert result.warnings[0].details["failed_operations"] == 2
+    assert (
+        result.warnings[0].message
+        == "A cache operation failed; this perception ran without caching."
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_cache_failure_leaks_no_key_path_or_exception_text(image_bytes: bytes) -> None:
+    backend = _ModelCaptionBackend(model_revision=_RESOLVED_REVISION)
+    cache = _FailingCache(fail_get=True, fail_set=True)
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        cache=cache,
+        settings=_settings(()),
+    ) as client:
+        result = await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    serialized = result.model_dump_json()
+    assert _CACHE_CANARY not in serialized
+    assert "/var/cache/" not in serialized
+    assert cache.gets and cache.sets
+    for key in (*cache.gets, *cache.sets):
+        assert key not in serialized
+
+
+@pytest.mark.asyncio
+async def test_cache_failures_are_counted_once_per_operation_in_the_trace(
+    image_bytes: bytes,
+) -> None:
+    backend = _ModelCaptionBackend(model_revision=_RESOLVED_REVISION)
+    cache = _FailingCache(
+        fail_get=True,
+        fail_set=True,
+        error=PenampakanError(_CACHE_CANARY, code="cache_unwritable"),
+    )
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        cache=cache,
+        settings=_settings(()),
+    ) as client:
+        result = await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    failures = tuple(event for event in result.trace.events if event.event_type == _CACHE_FAILURE)
+    assert [event.data["operation"] for event in failures] == ["get", "set"]
+    assert {event.data["error_type"] for event in failures} == {"PenampakanError"}
+    assert {event.data["error_code"] for event in failures} == {"cache_unwritable"}
+    assert result.trace.summary.cache_hits == 0
+    assert result.warnings[0].details["error_code"] == "cache_unwritable"
+    assert _CACHE_CANARY not in result.model_dump_json()
+
+
+@pytest.mark.asyncio
+async def test_cache_cancellation_still_propagates(image_bytes: bytes) -> None:
+    backend = _ModelCaptionBackend(model_revision=_RESOLVED_REVISION)
+    cache = _FailingCache(fail_get=True, error=asyncio.CancelledError())
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        cache=cache,
+        settings=_settings(()),
+    ) as client:
+        with pytest.raises(asyncio.CancelledError):
+            await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    assert backend.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_a_genuine_cache_hit_keeps_backend_attribution(image_bytes: bytes) -> None:
+    backend = _ModelCaptionBackend(model_revision=_RESOLVED_REVISION)
+    cache = _RecordingCache(durable=True)
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        cache=cache,
+        settings=_settings(()),
+    ) as client:
+        await client.inspect(image_bytes, _duplicate_caption_plan(1))
+        second = await client.inspect(image_bytes, _duplicate_caption_plan(1))
+
+    provenance = second.observations[0].provenance
+    assert backend.calls == 1
+    assert provenance.cache_hit is True
+    assert provenance.backend_name == "tests.model_caption"
+    assert provenance.model_id == "org/caption"
+    assert provenance.model_revision == _RESOLVED_REVISION
+    assert [warning.code for warning in second.warnings] == []
+
+
+@pytest.mark.asyncio
+async def test_a_shared_population_from_a_fallback_backend_is_not_a_cache_hit(
+    image_bytes: bytes,
+) -> None:
+    unavailable_calls = 0
+    successful_calls = 0
+
+    async def unavailable(image: BackendImage, request: VisionRequest) -> VisionResult:
+        nonlocal unavailable_calls
+        unavailable_calls += 1
+        await asyncio.sleep(0.05)
+        raise BackendUnavailableError(code="scripted_unavailable")
+
+    async def successful(image: BackendImage, request: VisionRequest) -> VisionResult:
+        nonlocal successful_calls
+        successful_calls += 1
+        await asyncio.sleep(0.05)
+        assert isinstance(request, CaptionRequest)
+        return _caption_result(request, "Fallback caption")
+
+    features = {Capability.CAPTION: frozenset({"caption.focus"})}
+    primary = _backend(
+        "tests.fallback_first", (Capability.CAPTION,), unavailable, features=features
+    )
+    secondary = _backend(
+        "tests.fallback_second", (Capability.CAPTION,), successful, features=features
+    )
+
+    async with AsyncPenampakan(
+        backends=(primary, secondary),
+        cache=_RecordingCache(durable=False),
+        settings=_settings(()),
+    ) as client:
+        result = await client.inspect(image_bytes, _duplicate_caption_plan(3))
+
+    assert len(result.observations) == 3
+    assert {item.provenance.backend_name for item in result.observations} == {
+        "tests.fallback_second"
+    }
+    assert not any(item.provenance.cache_hit for item in result.observations)
+    assert unavailable_calls == 3
+    assert successful_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_a_shared_population_deduplicates_across_separate_sessions(
+    image_bytes: bytes,
+) -> None:
+    calls = 0
+
+    async def slow_caption(image: BackendImage, request: VisionRequest) -> VisionResult:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.05)
+        assert isinstance(request, CaptionRequest)
+        return _caption_result(request, "A shared caption")
+
+    backend = _backend("tests.shared", (Capability.CAPTION,), slow_caption)
+    plan = _duplicate_caption_plan(1)
+
+    async with AsyncPenampakan(
+        backends=(backend,),
+        cache=_RecordingCache(durable=False),
+        settings=_settings(()),
+    ) as client:
+        # Two private sessions over identical bytes share the client's flight.
+        first, second = await asyncio.gather(
+            client.inspect(image_bytes, plan),
+            client.inspect(image_bytes, plan),
+        )
+
+    assert calls == 1
+    served = {item.provenance.backend_name for item in (*first.observations, *second.observations)}
+    assert served == {"tests.shared"}
 
 
 _UNRESOLVED_REVISION = "unresolved_model_revision"

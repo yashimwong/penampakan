@@ -55,6 +55,7 @@ from penampakan.models import (
     BackendDescriptor,
     BackendImage,
     Box,
+    CacheStats,
     Capability,
     CapabilityDescriptor,
     CaptionPayload,
@@ -106,7 +107,14 @@ from penampakan.models import (
     WarningInfo,
     WarningPayload,
 )
-from penampakan.protocols import ActionPolicy, Cache, TextLLM, TraceSink, VisionBackend
+from penampakan.protocols import (
+    ActionPolicy,
+    Cache,
+    ManagedCache,
+    TextLLM,
+    TraceSink,
+    VisionBackend,
+)
 from penampakan.session import AsyncVisionSession
 from penampakan.sync import Penampakan, VisionSession
 
@@ -129,6 +137,7 @@ __all__ = (
     "BudgetExceededError",
     "Cache",
     "CacheSettings",
+    "CacheStats",
     "CallableTextLLM",
     "CallableVisionBackend",
     "Capability",
@@ -166,6 +175,7 @@ __all__ = (
     "LLMNotConfiguredError",
     "LLMRequest",
     "LLMResponse",
+    "ManagedCache",
     "Message",
     "MessageRole",
     "MetadataPayload",

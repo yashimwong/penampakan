@@ -26,7 +26,7 @@ async def async_main() -> None:
     if not api_key:
         raise SystemExit("Set OPENAI_API_KEY after installing penampakan[openai].")
     settings = Settings(
-        cache=CacheSettings(enabled=True),
+        cache=CacheSettings(mode="memory"),
         agent=AgentSettings(initial_capabilities=(Capability.METADATA, Capability.COLORS)),
     )
     plan = InspectionPlan(
