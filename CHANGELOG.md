@@ -1,6 +1,7 @@
 # Changelog
 
-## Unreleased
+## Penampakan 0.4.0
+Released 2026-08-18
 
 Breaking: an unpinned `TesseractBackend` now reports an extra trailing
 `unpinned_engine_version` warning on every OCR result, and a caller-supplied
