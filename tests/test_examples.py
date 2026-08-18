@@ -21,6 +21,36 @@ OFFLINE_OUTPUTS = {
     ),
     "08_multi_image.py": ("SKIPPED: multi-image sessions require specification 10",),
 }
+# A subprocess example runs with a deliberately minimal environment so it cannot
+# read a credential, but an interpreter still needs a few platform variables
+# before it will start at all. Windows in particular resolves system libraries
+# through SYSTEMROOT.
+_PLATFORM_REQUIRED_VARIABLES = (
+    "SYSTEMROOT",
+    "WINDIR",
+    "COMSPEC",
+    "PATHEXT",
+    "TEMP",
+    "TMP",
+    "LD_LIBRARY_PATH",
+)
+
+
+def _isolated_environment(**overrides: str) -> dict[str, str]:
+    """Return a credential-free subprocess environment that can start Python."""
+    environment = {
+        "PATH": os.environ.get("PATH", ""),
+        "PYTHONPATH": str(ROOT / "src"),
+    }
+    for name in _PLATFORM_REQUIRED_VARIABLES:
+        value = os.environ.get(name)
+        if value is not None:
+            environment[name] = value
+    environment.update(overrides)
+    assert not any(
+        marker in name for name in environment for marker in ("KEY", "TOKEN", "CREDENTIAL")
+    )
+    return environment
 
 
 @pytest.mark.parametrize("path", EXAMPLES, ids=lambda path: path.name)
@@ -47,11 +77,7 @@ def test_example_import_is_safe(
 
 @pytest.mark.parametrize("name,expected", OFFLINE_OUTPUTS.items())
 def test_offline_example_subprocess(name: str, expected: tuple[str, ...], tmp_path: Path) -> None:
-    environment = {
-        "PATH": os.environ.get("PATH", ""),
-        "PYTHONPATH": str(ROOT / "src"),
-        "PYTHONIOENCODING": "utf-8",
-    }
+    environment = _isolated_environment(PYTHONIOENCODING="utf-8")
     completed = subprocess.run(
         [sys.executable, str(ROOT / "examples" / name)],
         cwd=tmp_path,
@@ -95,7 +121,7 @@ def test_readme_quickstart_matches_example_and_executes(tmp_path: Path) -> None:
     completed = subprocess.run(
         [sys.executable, "-c", f"{snippet}\n\nmain()\n"],
         cwd=tmp_path,
-        env={"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(ROOT / "src")},
+        env=_isolated_environment(),
         capture_output=True,
         text=True,
         timeout=20,
