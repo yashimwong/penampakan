@@ -1,4 +1,22 @@
-Penampakan 0.2.1
+# Changelog
+
+## [Unreleased]
+
+- Added maintained product, architecture, contract, runtime, and quality guides
+  grounded in the shipped public API.
+- Exposed `CallableTextLLM`, `CallableVisionBackend`, and `PillowBackend` on the
+  base-install top level, and added
+  `penampakan.reasoning.supported_prompt_versions()` for behavioral-version
+  discovery.
+- Added import-safe runnable examples for inspection, hosted and local answering,
+  custom adapters, reusable sessions, tracing, bounded abstention, and the
+  current single-image limitation.
+- Added documentation/example validation, local Markdown link checks, package
+  metadata and distribution-content release gates.
+- Recorded the existing metadata orchestration-overhead result in an immutable
+  manifest and clarified that smoke/contract checks are not accuracy evidence.
+
+## Penampakan 0.2.1
 Released 2026-08-18
 
 Real-dependency integration coverage now exercises pinned Tesseract and
@@ -8,7 +26,7 @@ goldens use the public-domain NASA astronaut fixture with recorded caption and
 detection revisions, confidence and IoU thresholds, attribution, and SHA-256.
 The scheduled integration workflow fails when any required category only skips.
 
-Penampakan 0.2.0
+## Penampakan 0.2.0
 Released 2026-08-16
 
 Metadata inspection now reuses the loader's canonical image, uses balanced PNG
@@ -122,7 +140,7 @@ multipleOf constraints use decimal arithmetic, OpenAI retry policies are
 validated during construction, and strict schema compilation preserves root
 descriptions.
 
-Penampakan 0.1.0
+## Penampakan 0.1.0
 Released 2026-08-10
 
 Initial release of bounded visual tool orchestration for text-only language

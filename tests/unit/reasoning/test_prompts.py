@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from penampakan.models import MessageRole, PolicyInput, WarningInfo
+from penampakan.reasoning import supported_prompt_versions
 from penampakan.reasoning.prompts import (
     AGENT_V1_SYSTEM_PROMPT,
     PROMPT_VERSION,
@@ -32,6 +33,7 @@ def _assert_strict_objects(value: object) -> None:
 
 def test_agent_prompt_contains_all_versioned_security_rules() -> None:
     assert PROMPT_VERSION == "agent-v1"
+    assert supported_prompt_versions() == (PROMPT_VERSION,)
     assert build_system_prompt() == AGENT_V1_SYSTEM_PROMPT
     for number in range(1, 11):
         assert f"{number}." in AGENT_V1_SYSTEM_PROMPT

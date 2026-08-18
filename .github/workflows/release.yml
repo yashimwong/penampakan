@@ -24,6 +24,7 @@ jobs:
       - run: ruff check .
       - run: ruff format --check .
       - run: mypy --strict src/penampakan
+      - run: python scripts/check_links.py
       - run: pytest -m 'not models and not ocr and not providers' --cov=penampakan --cov-fail-under=90
       - run: >-
           pytest
@@ -53,6 +54,7 @@ jobs:
           f'tag ${{ github.ref_name }} does not match v{version}'"
       - run: python -m build
       - run: python -m twine check dist/*
+      - run: python scripts/check_distribution.py dist/*
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
       - name: Create GitHub release

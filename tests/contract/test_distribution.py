@@ -9,7 +9,32 @@ def test_distribution_metadata_declares_supported_runtime() -> None:
     package_metadata = metadata("penampakan")
 
     assert SpecifierSet(package_metadata["Requires-Python"]) == SpecifierSet(">=3.10,<3.14")
-    assert package_metadata["License"] == "MIT"
+    assert "MIT" in package_metadata["License"]
+    assert package_metadata.get_all("Classifier") is not None
+    assert "License :: OSI Approved :: MIT License" in package_metadata.get_all("Classifier")
+    assert "Typing :: Typed" in package_metadata.get_all("Classifier")
+
+
+def test_distribution_metadata_uses_canonical_project_urls() -> None:
+    package_metadata = metadata("penampakan")
+    project_urls = {
+        label.strip(): url.strip()
+        for item in package_metadata.get_all("Project-URL") or ()
+        for label, separator, url in [item.partition(",")]
+        if separator
+    }
+
+    assert project_urls == {
+        "Homepage": "https://github.com/yashimwong/penampakan",
+        "Repository": "https://github.com/yashimwong/penampakan.git",
+        "Documentation": "https://github.com/yashimwong/penampakan/tree/master/docs",
+        "Changelog": "https://github.com/yashimwong/penampakan/blob/master/CHANGELOG.md",
+        "Issues": "https://github.com/yashimwong/penampakan/issues",
+    }
+    assert all(
+        url.startswith("https://github.com/yashimwong/penampakan") for url in project_urls.values()
+    )
+    assert not any("placeholder" in url or "example.com" in url for url in project_urls.values())
 
 
 def test_distribution_metadata_declares_dependencies_and_extras() -> None:
@@ -37,6 +62,16 @@ def test_distribution_metadata_declares_dependencies_and_extras() -> None:
     assert any(
         item.marker is not None and 'extra == "dev"' in str(item.marker) for item in dependencies
     )
+    assert set(metadata("penampakan").get_all("Provides-Extra") or ()) == {
+        "anthropic",
+        "benchmark",
+        "dev",
+        "litellm",
+        "ocr",
+        "openai",
+        "providers",
+        "transformers",
+    }
 
 
 def test_distribution_metadata_declares_bounded_provider_extras() -> None:

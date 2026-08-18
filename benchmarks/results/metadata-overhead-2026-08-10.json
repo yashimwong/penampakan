@@ -1,0 +1,68 @@
+{
+  "schema_version": "penampakan-metadata-overhead-manifest-v1",
+  "recorded_at": "2026-08-10",
+  "source_commit": "23fba0e6e17301582ed9fb0ecba1cb0b28b82145",
+  "benchmark": {
+    "script": "benchmarks/benchmark_metadata.py",
+    "claim_class": "orchestration_overhead",
+    "operation": "decode PNG bytes and return width, height, and alpha metadata",
+    "scorer": "exact tuple equality for (width, height, has_alpha)",
+    "scorer_version": "benchmark_metadata.py@23fba0e6e17301582ed9fb0ecba1cb0b28b82145"
+  },
+  "dataset": {
+    "name": "deterministic synthetic RGBA PNG fixture",
+    "generator": "benchmarks.benchmark_metadata._fixture",
+    "generator_revision": "23fba0e6e17301582ed9fb0ecba1cb0b28b82145",
+    "width": 640,
+    "height": 480,
+    "mode": "RGBA",
+    "encoded_bytes": 45019,
+    "sha256": "abc4a9db756654bad62220bc98d7655a1826e68c66e0bab02571c33b7f2992c2"
+  },
+  "models": {
+    "text_llm": null,
+    "vision_model": null,
+    "snapshot": "not applicable; metadata-only Pillow implementations"
+  },
+  "environment": {
+    "python": "3.13.15",
+    "platform": "x86-64 WSL2, Linux 6.18.33.2, glibc 2.43",
+    "packages": {
+      "penampakan": "0.1.0",
+      "Pillow": "12.3.0",
+      "opencv-python-headless": "5.0.0",
+      "imageio": "2.37.4"
+    }
+  },
+  "repetitions": {
+    "warmups_per_case": 3,
+    "iterations_per_sample": 20,
+    "rotating_rounds": 5,
+    "reusable_inspections_per_session": 20
+  },
+  "one_shot_results": [
+    {"name": "Penampakan", "median_ms": 18.846, "min_ms": 18.781, "max_ms": 19.030, "calls_per_second": 53.1, "relative_to_fastest": 6.85},
+    {"name": "Pillow (direct)", "median_ms": 2.753, "min_ms": 2.737, "max_ms": 2.806, "calls_per_second": 363.2, "relative_to_fastest": 1.00},
+    {"name": "OpenCV", "median_ms": 3.237, "min_ms": 3.129, "max_ms": 3.461, "calls_per_second": 309.0, "relative_to_fastest": 1.18},
+    {"name": "ImageIO", "median_ms": 4.431, "min_ms": 4.347, "max_ms": 4.470, "calls_per_second": 225.7, "relative_to_fastest": 1.61}
+  ],
+  "reusable_session": {
+    "median_open_ms": 18.114,
+    "median_warm_inspection_ms": 0.494,
+    "median_close_ms": 0.096,
+    "median_amortized_ms": 1.432,
+    "speedup_vs_penampakan_one_shot": 13.16
+  },
+  "contract_checks": {
+    "passed": 6,
+    "total": 6,
+    "scope": "format normalization, EXIF orientation, alpha normalization, malformed/animated rejection, remote/input bounds, provenance/trace"
+  },
+  "limitations": [
+    "This measures orchestration overhead, not visual-question-answering accuracy or capability.",
+    "The generated fixture is not a scientific image dataset and no language or vision model was evaluated.",
+    "Contract checks are behavioral smoke checks, not accuracy evidence.",
+    "Latency is hardware- and environment-dependent; comparisons should be repeated on the same machine.",
+    "The recorded output predates later Penampakan releases and must not be relabeled as current-version performance."
+  ]
+}

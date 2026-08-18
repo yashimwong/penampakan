@@ -12,6 +12,11 @@ captioning or detection.
 
 Penampakan is currently alpha software.
 
+Maintained guides: [product scope](docs/product.md),
+[architecture and ownership](docs/architecture.md),
+[public contracts](docs/contracts.md), [runtime behavior](docs/runtime.md), and
+[quality/release gates](docs/quality.md).
+
 ## Why Penampakan?
 
 - Provider-neutral protocols for text LLMs and vision backends.
@@ -53,7 +58,10 @@ constructing an adapter without its extra raises
 
 Inspect an image without configuring an LLM:
 
+<!-- quickstart:start -->
 ```python
+from PIL import Image
+
 from penampakan import (
     ColorsRequest,
     InspectionOperation,
@@ -62,25 +70,45 @@ from penampakan import (
     Penampakan,
 )
 
-plan = InspectionPlan(
-    operations=(
-        InspectionOperation(request=MetadataRequest()),
-        InspectionOperation(request=ColorsRequest(count=5)),
-    ),
-    include_available_overview=False,
-)
 
-with Penampakan() as vision:
-    result = vision.inspect("photo.png", plan)
-
-for observation in result.observations:
-    print(observation.payload)
+def main() -> None:
+    plan = InspectionPlan(
+        operations=(
+            InspectionOperation(request=MetadataRequest(), required=True),
+            InspectionOperation(request=ColorsRequest(count=3), required=True),
+        ),
+        include_available_overview=False,
+    )
+    with Image.new("RGB", (64, 40), "tomato") as image, Penampakan() as vision:
+        result = vision.inspect(image, plan)
+    payloads = ",".join(item.payload.type for item in result.observations)
+    print(f"image={result.root_asset.width}x{result.root_asset.height}")
+    print(f"observations={payloads}")
 ```
+<!-- quickstart:end -->
+
+Call `main()` to print:
+
+```text
+image=64x40
+observations=metadata,colors
+```
+
+The tested source for this block is
+[`examples/01_inspect_without_llm.py`](examples/01_inspect_without_llm.py).
 
 For evidence-grounded question answering, construct `AsyncPenampakan` or
 `Penampakan` with a `TextLLM` implementation and the vision backends needed for
 the task, then call `ask(image, question)`. `CallableTextLLM` and
 `CallableVisionBackend` are available as adapters for application functions.
+
+For a hosted model, the runnable
+[`OpenAI example`](examples/02_ask_with_openai.py) reads `OPENAI_API_KEY` only
+when executed, nests the caller-owned adapter and client contexts, and prints
+the answer plus evidence IDs. For an entirely local stack, the
+[`local-model example`](examples/03_ask_with_local_models.py) combines a local
+LiteLLM endpoint with pinned Transformers caption weights and Tesseract OCR;
+its docstring lists the required extras, executable, server, and cached model.
 
 ### Provider adapters
 
@@ -163,7 +191,20 @@ Pillow images. Remote URLs are rejected by default. Images are orientation
 corrected, bounded by configurable limits, and normalized to canonical RGB or
 RGBA assets before a backend sees them.
 
-## Benchmark
+Penampakan currently supports one root image per session; ordered multi-image
+questions and aggregate image limits have not shipped. Trace redaction and cache
+retention are independent: trace content is excluded by default, the cache is
+off by default, and the built-in opt-in cache is process-local. A custom durable
+cache may retain sensitive OCR or caption content and is the caller's retention
+decision. Model-backed vision results are eligible for durable reuse only when
+the backend reports an exact model revision. See [runtime behavior](docs/runtime.md)
+for the trust boundary, budgets, trace schema, and retention details.
+
+Evidence citations are structural. The library proves that a cited observation
+was available in the current image lineage; it does not independently prove that
+the observation entails the claim or matches visual truth.
+
+## Orchestration overhead
 
 The benchmark is at
 [`benchmarks/benchmark_metadata.py`](benchmarks/benchmark_metadata.py). It
@@ -191,6 +232,12 @@ python benchmarks/benchmark_metadata.py --reuse-count 50
 python benchmarks/benchmark_metadata.py --format json
 python benchmarks/benchmark_metadata.py --plot benchmarks/metadata_latency.png
 ```
+
+The immutable
+[`metadata-overhead-2026-08-10` manifest](benchmarks/results/metadata-overhead-2026-08-10.json)
+records the generated dataset artifact and SHA-256, exact-tuple scorer and
+version, absence of any text/vision model snapshot, source commit, environment,
+date, repetitions, full measurements, and limitations.
 
 Reference results captured on 10 August 2026 with Python 3.13.15 on x86-64
 WSL2 (Linux 6.18.33.2, glibc 2.43) are shown below. The run used the default
@@ -223,7 +270,8 @@ The same run passed six executed contract checks:
 - remote-source policy and input-byte bounds; and
 - authoritative backend provenance with a completed redacted trace.
 
-This is an overhead benchmark, not a capability or accuracy ranking. The
+This is an orchestration-overhead benchmark, not a capability or accuracy
+ranking. The
 Penampakan path performs bounded input handling, orientation and mode
 normalization, canonical encoding and hashing, typed result validation,
 routing, tracing, and session cleanup. The direct alternatives only decode the
@@ -231,6 +279,11 @@ fixture and return equivalent dimensions and alpha metadata. Contract checks
 are reported separately from latency rankings. Compare results on the same
 machine and treat very short runs as smoke tests rather than stable
 measurements.
+
+Fake-backed and deterministic runs validate benchmark plumbing only and are
+never product accuracy evidence. Penampakan does not publish an accuracy claim
+until a result links an immutable manifest naming its dataset, scorer, exact
+model/backend snapshots, date, repetitions, resource budgets, and limitations.
 
 ## Development
 

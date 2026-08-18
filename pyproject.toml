@@ -8,7 +8,7 @@ version = "0.2.1"
 description = "Safe visual tool orchestration for text-only language models"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [{ name = "Penampakan contributors" }]
 classifiers = [
   "Development Status :: 3 - Alpha",
@@ -25,6 +25,13 @@ dependencies = [
   "pydantic>=2.7,<3",
   "typing-extensions>=4.10; python_version < '3.12'",
 ]
+
+[project.urls]
+Homepage = "https://github.com/yashimwong/penampakan"
+Repository = "https://github.com/yashimwong/penampakan.git"
+Documentation = "https://github.com/yashimwong/penampakan/tree/master/docs"
+Changelog = "https://github.com/yashimwong/penampakan/blob/master/CHANGELOG.md"
+Issues = "https://github.com/yashimwong/penampakan/issues"
 
 [project.optional-dependencies]
 ocr = ["pytesseract>=0.3.10"]

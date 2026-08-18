@@ -1,0 +1,23 @@
+name: external links
+
+on:
+  schedule:
+    - cron: "37 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  external-links:
+    # Remote servers, rate limits, and certificates are outside release control.
+    # Report failures without making this unstable signal a merge or release gate.
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Check remote Markdown links
+        run: python scripts/check_links.py --external-only

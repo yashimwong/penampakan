@@ -12,4 +12,8 @@ htmlcov/
 *.egg-info/
 *.py[cod]
 !README.md
+!CHANGELOG.md
+!IMPLEMENTATION_SPEC.md
+!docs/
+!docs/*.md
 specs

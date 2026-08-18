@@ -1,6 +1,7 @@
 """Safe visual tool orchestration for text-only language models."""
 
 from penampakan._version import __version__
+from penampakan.backends import CallableVisionBackend, PillowBackend
 from penampakan.client import AsyncPenampakan
 from penampakan.config import (
     AgentSettings,
@@ -47,6 +48,7 @@ from penampakan.errors import (
     ToolLimitExceededError,
     UnsupportedImageError,
 )
+from penampakan.llms.callable import CallableTextLLM
 from penampakan.models import (
     AnswerAction,
     AnswerStatus,
@@ -127,6 +129,8 @@ __all__ = (
     "BudgetExceededError",
     "Cache",
     "CacheSettings",
+    "CallableTextLLM",
+    "CallableVisionBackend",
     "Capability",
     "CapabilityDescriptor",
     "CapabilityError",
@@ -174,6 +178,7 @@ __all__ = (
     "OperationTimeoutError",
     "Penampakan",
     "PenampakanError",
+    "PillowBackend",
     "Point",
     "PolicyAction",
     "PolicyDeniedError",
