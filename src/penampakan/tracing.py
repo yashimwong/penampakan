@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import math
+import re
 import time
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -32,6 +35,23 @@ StopReason = Literal[
     "cancelled",
     "error",
 ]
+
+InvocationOutcome = Literal[
+    "ok",
+    "error",
+    "cancelled",
+    "timeout",
+    "refused",
+    "truncated",
+    "cache_hit",
+]
+
+_INVOCATION_OUTCOMES = frozenset(
+    {"ok", "error", "cancelled", "timeout", "refused", "truncated", "cache_hit"}
+)
+_INVOCATION_STACK: contextvars.ContextVar[tuple[tuple[UUID, str], ...]] = contextvars.ContextVar(
+    "penampakan_trace_invocation_stack", default=()
+)
 
 _STOP_REASONS = frozenset(
     {
@@ -61,6 +81,9 @@ REQUIRED_EVENT_TYPES = frozenset(
         "tool_call_started",
         "backend_call_started",
         "backend_call_finished",
+        "tool_call_finished",
+        "verification_started",
+        "verification_finished",
         "cache_hit",
         "cache_operation_failed",
         "asset_created",
@@ -71,6 +94,73 @@ REQUIRED_EVENT_TYPES = frozenset(
         "run_failed",
     }
 )
+
+
+@dataclass(slots=True)
+class _InvocationContext:
+    """One correlated duration operation with protected, exactly-once finish."""
+
+    builder: TraceBuilder
+    operation: Literal["policy_call", "tool_call", "backend_call", "verification"]
+    invocation_id: str
+    parent_invocation_id: str
+    started_monotonic: float
+    _token: contextvars.Token[tuple[tuple[UUID, str], ...]] | None = None
+    _finished: bool = False
+
+    async def __aenter__(self) -> _InvocationContext:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: object,
+    ) -> None:
+        outcome, error = _exception_outcome(exc_value)
+        await self.finish(outcome=outcome, error=error)
+
+    async def finish(
+        self,
+        *,
+        outcome: InvocationOutcome = "ok",
+        data: Mapping[str, object] | None = None,
+        error: BaseException | None = None,
+    ) -> TraceEvent:
+        """Emit the matching finish once and return it on repeated calls."""
+        if outcome not in _INVOCATION_OUTCOMES:
+            raise ValueError("invocation outcome is invalid")
+        self._deactivate()
+        finish_data = dict(data or {})
+        finish_data["outcome"] = outcome
+        if error is not None:
+            finish_data["error"] = error
+        duration_ms = self.builder._duration_since(self.started_monotonic)
+        return await self.builder._finish_invocation(self, finish_data, duration_ms)
+
+    def _deactivate(self) -> None:
+        """Restore the invocation stack when called from its originating context."""
+        if self._token is not None:
+            try:
+                _INVOCATION_STACK.reset(self._token)
+            except ValueError:
+                # A finalizer may close an invocation owned by another task.
+                # That task restores its own copied context when it unwinds.
+                return
+            self._token = None
+
+
+def _exception_outcome(
+    error: BaseException | None,
+) -> tuple[InvocationOutcome, BaseException | None]:
+    if error is None:
+        return "ok", None
+    if isinstance(error, asyncio.CancelledError):
+        return "cancelled", error
+    if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+        return "timeout", error
+    return "error", error
+
 
 _PATH_KEYS = frozenset(
     {
@@ -99,9 +189,18 @@ _OBSERVATION_TEXT_KEYS = frozenset(
     }
 )
 _MODEL_OUTPUT_KEYS = frozenset(
-    {"invalid_model_output", "llm_output", "model_output", "raw_model_output"}
+    {
+        "invalid_model_output",
+        "llm_output",
+        "model_output",
+        "provider_output",
+        "raw_model_output",
+        "raw_output",
+    }
 )
-_ANSWER_KEYS = frozenset({"answer", "answers", "final_answer"})
+_ANSWER_KEYS = frozenset(
+    {"answer", "answers", "final_answer", "verification_reason", "verifier_reason"}
+)
 _ALWAYS_REDACTED_KEYS = frozenset(
     {
         "api_key",
@@ -142,7 +241,21 @@ def _safe_key(key: object) -> str | None:
 
 def _key_category(key: str) -> str | None:
     normalized = key.casefold().replace("-", "_")
-    if normalized in _ALWAYS_REDACTED_KEYS:
+    if normalized in _ALWAYS_REDACTED_KEYS or normalized.endswith(
+        (
+            "_arguments",
+            "_bytes",
+            "_cookie",
+            "_credentials",
+            "_headers",
+            "_password",
+            "_pixels",
+            "_prompt",
+            "_prompts",
+            "_secret",
+            "_token",
+        )
+    ):
         return "always"
     if normalized in _PATH_KEYS or normalized.endswith("_path"):
         return "path"
@@ -189,7 +302,7 @@ def _safe_string(value: str) -> str | None:
 def _safe_error(value: BaseException) -> dict[str, JsonValue]:
     data: dict[str, JsonValue] = {"error_type": type(value).__name__}
     code = getattr(value, "code", None)
-    if isinstance(code, str) and _safe_string(code) is not None:
+    if isinstance(code, str) and re.fullmatch(r"[a-z][a-z0-9_]{0,63}", code):
         data["code"] = code
     retryable = getattr(value, "retryable", None)
     if isinstance(retryable, bool):
@@ -280,6 +393,7 @@ class TraceBuilder:
         if selected_id.version != 4:
             raise ValueError("trace_id must be a UUIDv4 value")
         self._trace_id = selected_id
+        self._run_invocation_id = uuid4().hex
         self._content_policy = content_policy or TraceContentPolicy()
         self._sinks = tuple(sinks)
         self._wall_clock = wall_clock or self._utc_now
@@ -300,6 +414,8 @@ class TraceBuilder:
         self._input_tokens: int | None = None
         self._output_tokens: int | None = None
         self._failed_sink_ids: set[int] = set()
+        self._active_invocations: dict[str, _InvocationContext] = {}
+        self._invocation_finishes: dict[str, TraceEvent] = {}
         self._sink_warning_emitted = False
         self._closed = False
         self._close_task: asyncio.Task[None] | None = None
@@ -330,6 +446,11 @@ class TraceBuilder:
         return self._trace_id
 
     @property
+    def run_invocation_id(self) -> str:
+        """Return the opaque invocation identifier used as the run span parent."""
+        return self._run_invocation_id
+
+    @property
     def events(self) -> tuple[TraceEvent, ...]:
         """Return an immutable snapshot of emitted events."""
         return tuple(self._events)
@@ -348,12 +469,25 @@ class TraceBuilder:
         current = self._validated_monotonic(self._monotonic_clock())
         return max(0, int((current - self._started_monotonic) * 1000.0))
 
+    def _duration_since(self, started: float) -> int:
+        current = self._validated_monotonic(self._monotonic_clock())
+        return max(0, int((current - started) * 1000.0))
+
+    def _current_parent_invocation_id(self) -> str:
+        for trace_id, invocation_id in reversed(_INVOCATION_STACK.get()):
+            if trace_id == self._trace_id:
+                return invocation_id
+        return self._run_invocation_id
+
     def _new_event(
         self,
         event_type: str,
         data: Mapping[str, object] | None,
         duration_ms: int | None,
         occurred_at: datetime | None = None,
+        *,
+        invocation_id: str | None = None,
+        parent_invocation_id: str | None = None,
     ) -> TraceEvent:
         if duration_ms is not None:
             if isinstance(duration_ms, bool) or not isinstance(duration_ms, int):
@@ -361,11 +495,14 @@ class TraceBuilder:
             if duration_ms < 0:
                 raise ValueError("duration_ms cannot be negative")
         event = TraceEvent(
+            schema_version=2,
             trace_id=self._trace_id,
             sequence=self._sequence,
             event_type=event_type,
             occurred_at=self._validated_utc(occurred_at or self._wall_clock()),
             duration_ms=duration_ms,
+            invocation_id=invocation_id,
+            parent_invocation_id=parent_invocation_id,
             data=redact_trace_data(data, self._content_policy),
         )
         self._sequence += 1
@@ -438,7 +575,13 @@ class TraceBuilder:
     ) -> TraceEvent:
         if self._started:
             return self._events[0]
-        event = self._new_event("run_started", data, None, occurred_at=self._started_at)
+        event = self._new_event(
+            "run_started",
+            data,
+            None,
+            occurred_at=self._started_at,
+            invocation_id=self._run_invocation_id,
+        )
         self._started = True
         await self._emit_to_sinks(event)
         return event
@@ -456,6 +599,8 @@ class TraceBuilder:
         data: Mapping[str, object] | None = None,
         *,
         duration_ms: int | None = None,
+        invocation_id: str | None = None,
+        parent_invocation_id: str | None = None,
     ) -> TraceEvent:
         """Append and safely deliver one already-redacted immutable event."""
         async with self._lock:
@@ -464,9 +609,103 @@ class TraceBuilder:
             await self._ensure_started_locked()
             if event_type in {"run_started", "run_finished", "run_failed"}:
                 raise ValueError("lifecycle events are managed by TraceBuilder")
-            event = self._new_event(event_type, data, duration_ms)
+            selected_parent = parent_invocation_id
+            if selected_parent is None and invocation_id is None:
+                selected_parent = self._current_parent_invocation_id()
+            event = self._new_event(
+                event_type,
+                data,
+                duration_ms,
+                invocation_id=invocation_id,
+                parent_invocation_id=selected_parent,
+            )
             await self._emit_to_sinks(event)
             return event
+
+    async def start_invocation(
+        self,
+        operation: Literal["policy_call", "tool_call", "backend_call", "verification"],
+        data: Mapping[str, object] | None = None,
+        *,
+        parent_invocation_id: str | None = None,
+    ) -> _InvocationContext:
+        """Start one duration operation and activate it for nested point events."""
+        parent = parent_invocation_id or self._current_parent_invocation_id()
+        invocation = _InvocationContext(
+            builder=self,
+            operation=operation,
+            invocation_id=uuid4().hex,
+            parent_invocation_id=parent,
+            started_monotonic=self._validated_monotonic(self._monotonic_clock()),
+        )
+        async with self._lock:
+            if self._final_trace is not None:
+                raise RuntimeError("cannot start invocations after trace finalization")
+            await self._ensure_started_locked()
+            event = self._new_event(
+                f"{operation}_started",
+                data,
+                None,
+                invocation_id=invocation.invocation_id,
+                parent_invocation_id=parent,
+            )
+            self._active_invocations[invocation.invocation_id] = invocation
+            await self._emit_to_sinks(event)
+        if not invocation._finished:
+            stack = _INVOCATION_STACK.get()
+            invocation._token = _INVOCATION_STACK.set(
+                (*stack, (self._trace_id, invocation.invocation_id))
+            )
+        return invocation
+
+    async def _finish_invocation(
+        self,
+        invocation: _InvocationContext,
+        data: Mapping[str, object],
+        duration_ms: int,
+    ) -> TraceEvent:
+        async with self._lock:
+            existing = self._invocation_finishes.get(invocation.invocation_id)
+            if existing is not None:
+                return existing
+            if self._final_trace is not None:
+                raise RuntimeError("invocation finish state is inconsistent")
+            return await self._finish_invocation_locked(invocation, data, duration_ms)
+
+    async def _finish_invocation_locked(
+        self,
+        invocation: _InvocationContext,
+        data: Mapping[str, object],
+        duration_ms: int,
+    ) -> TraceEvent:
+        event = self._new_event(
+            f"{invocation.operation}_finished",
+            data,
+            duration_ms,
+            invocation_id=invocation.invocation_id,
+            parent_invocation_id=invocation.parent_invocation_id,
+        )
+        invocation._finished = True
+        self._active_invocations.pop(invocation.invocation_id, None)
+        self._invocation_finishes[invocation.invocation_id] = event
+        await self._emit_to_sinks(event)
+        return event
+
+    async def _finish_active_invocations_locked(self, stop_reason: StopReason) -> None:
+        outcome: InvocationOutcome
+        if stop_reason == "cancelled":
+            outcome = "cancelled"
+        elif stop_reason == "timeout":
+            outcome = "timeout"
+        else:
+            outcome = "error"
+        for invocation in reversed(tuple(self._active_invocations.values())):
+            invocation._deactivate()
+            await self._finish_invocation_locked(
+                invocation,
+                {"outcome": outcome},
+                self._duration_since(invocation.started_monotonic),
+            )
 
     async def add_counts(
         self,
@@ -500,11 +739,11 @@ class TraceBuilder:
             self._derived_assets += derived_assets
             self._add_optional_tokens(input_tokens, output_tokens)
 
-    def _summary(self, stop_reason: StopReason) -> TraceSummary:
+    def _summary(self, stop_reason: StopReason, *, duration_ms: int | None = None) -> TraceSummary:
         return TraceSummary(
             trace_id=self._trace_id,
             started_at=self._started_at,
-            duration_ms=self._elapsed_ms(),
+            duration_ms=self._elapsed_ms() if duration_ms is None else duration_ms,
             llm_calls=self._llm_calls,
             tool_calls=self._tool_calls,
             backend_calls=self._backend_calls,
@@ -526,12 +765,20 @@ class TraceBuilder:
             if self._final_trace is not None:
                 return self._final_trace
             await self._ensure_started_locked()
+            await self._finish_active_invocations_locked(stop_reason)
+            elapsed_ms = self._elapsed_ms()
+            summary = self._summary(stop_reason, duration_ms=elapsed_ms)
             final_data = dict(data or {})
-            final_data["stop_reason"] = stop_reason
-            event = self._new_event(event_type, final_data, self._elapsed_ms())
+            final_data.update(summary.model_dump(mode="python", exclude={"trace_id", "started_at"}))
+            event = self._new_event(
+                event_type,
+                final_data,
+                elapsed_ms,
+                invocation_id=self._run_invocation_id,
+            )
             await self._emit_to_sinks(event)
             self._final_trace = RunTrace(
-                summary=self._summary(stop_reason),
+                summary=summary,
                 events=tuple(self._events),
             )
             return self._final_trace
@@ -563,7 +810,10 @@ class TraceBuilder:
         """Finalize cancellation with a run-finished event when safe."""
         return await self._finalize("cancelled", "run_finished", data)
 
-    async def _close_sinks(self) -> None:
+    async def _close_builder(self) -> None:
+        # Session code never closes a run-local builder. This explicit shutdown
+        # hook is retained for standalone builder owners and tests; normal sink
+        # ownership and draining belongs to AsyncPenampakan.
         for sink in self._sinks:
             try:
                 await sink.aclose()
@@ -576,10 +826,10 @@ class TraceBuilder:
         self._closed = True
 
     async def aclose(self) -> None:
-        """Close all owned sinks once while concurrent callers await one task."""
+        """Explicitly close sinks for a standalone builder owner once."""
         async with self._lock:
             if self._close_task is None:
-                self._close_task = asyncio.create_task(self._close_sinks())
+                self._close_task = asyncio.create_task(self._close_builder())
             close_task = self._close_task
         await asyncio.shield(close_task)
 
@@ -592,6 +842,7 @@ def _current_task_is_cancelling() -> bool:
 
 __all__ = [
     "REQUIRED_EVENT_TYPES",
+    "InvocationOutcome",
     "StopReason",
     "TraceBuilder",
     "redact_trace_data",

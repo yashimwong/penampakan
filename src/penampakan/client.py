@@ -96,6 +96,7 @@ class AsyncPenampakan:
         trace_sinks: Sequence[TraceSink] = (),
         owns_policy: bool = False,
         owns_llm: bool = False,
+        owns_trace_sinks: bool = False,
     ) -> None:
         self._settings = self._validated_settings(settings)
         if llm is not None and policy is not None:
@@ -104,7 +105,11 @@ class AsyncPenampakan:
             raise ConfigurationError(code="invalid_llm")
         if policy is not None and not callable(getattr(policy, "next_action", None)):
             raise ConfigurationError(code="invalid_policy")
-        if not isinstance(owns_policy, bool) or not isinstance(owns_llm, bool):
+        if (
+            not isinstance(owns_policy, bool)
+            or not isinstance(owns_llm, bool)
+            or not isinstance(owns_trace_sinks, bool)
+        ):
             raise ConfigurationError(code="invalid_ownership")
         if owns_llm and llm is None:
             raise ConfigurationError(code="invalid_ownership")
@@ -127,6 +132,11 @@ class AsyncPenampakan:
         )
         self._owns_policy = llm is not None or owns_policy
         self._trace_sinks = self._validate_trace_sinks(trace_sinks)
+        self._caller_owned_trace_sink_ids = (
+            frozenset(id(sink) for sink in self._trace_sinks)
+            if not owns_trace_sinks
+            else frozenset()
+        )
         self._cache = cache if cache is not None else self._default_cache(self._settings)
         self._validate_cache(self._cache)
         self._close_warnings: list[WarningInfo] = []
@@ -410,7 +420,11 @@ class AsyncPenampakan:
             ("router", self._router.aclose),
             *self._owned_policy_step(),
             ("cache", self._cache.aclose),
-            *((f"trace_sink_{index}", sink.aclose) for index, sink in enumerate(self._trace_sinks)),
+            *(
+                (f"trace_sink_{index}", sink.aclose)
+                for index, sink in enumerate(self._trace_sinks)
+                if id(sink) not in self._caller_owned_trace_sink_ids
+            ),
         )
 
     def _owned_policy_step(self) -> tuple[tuple[str, Callable[[], Awaitable[object]]], ...]:

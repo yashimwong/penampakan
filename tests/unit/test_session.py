@@ -528,7 +528,7 @@ async def test_retryable_backend_failure_falls_back_and_records_both_attempts(
     assert first_calls == 1
     assert second_calls == 1
     assert answer.trace.summary.backend_calls == 2
-    assert tuple(event.data["outcome"] for event in finished) == ("unavailable", "success")
+    assert tuple(event.data["outcome"] for event in finished) == ("error", "ok")
     assert answer.evidence[0].observation.provenance.backend_name == "tests.fallback_second"
     assert "backend_fallback" in {warning.code for warning in answer.warnings}
 

@@ -1,5 +1,29 @@
 # Changelog
 
+## Penampakan 0.6.0
+Released 2026-08-20
+
+- Trace events now use schema v2 with opaque invocation and parent IDs,
+  correlated start/finish pairs for policy, tool, backend, and verification
+  operations, and self-contained terminal summary counters. Missing versions
+  remain legacy v1 for backward parsing only; their formerly valid event names,
+  including dotted names, remain accepted while v2 enforces lower snake case.
+- Added bounded `InMemoryTraceSink`, single-writer rotating `JsonlTraceSink`, and
+  optional injected-provider `OpenTelemetryTraceSink`. JSONL defaults to
+  non-blocking overflow and explicitly supports concurrent sessions only within
+  one process. OpenTelemetry CI versions are pinned in the optional requirements.
+- Trace finalization now finishes every still-active invocation before emitting
+  the terminal event, including cancellation while a shielded single-flight
+  backend population unwinds, so every start retains exactly one matching finish.
+- OpenTelemetry retains a bounded set of completed invocation span contexts, so
+  a tool selected by a completed policy call keeps the policy span as its causal
+  parent instead of being diagnosed and reparented to the run.
+- JSONL's default symlink protection now rejects links in every component of the
+  configured path, not only the final filename. `allow_symlink=True` remains the
+  explicit opt-in for linked destinations.
+- Caller-supplied trace sinks are now caller-owned by default. Set
+  `owns_trace_sinks=True` to drain and close them with the client.
+
 ## Penampakan 0.5.0
 Released 2026-08-18
 

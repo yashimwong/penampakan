@@ -1,0 +1,65 @@
+{
+  "$defs": {
+    "JsonValue": {
+      "anyOf": [
+        {"type": "boolean"},
+        {"type": "integer"},
+        {"type": "number"},
+        {"type": "string"},
+        {"items": {"$ref": "#/$defs/JsonValue"}, "type": "array"},
+        {"additionalProperties": {"$ref": "#/$defs/JsonValue"}, "type": "object"},
+        {"type": "null"}
+      ]
+    }
+  },
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {"schema_version": {"const": 2}},
+        "required": ["schema_version"]
+      },
+      "then": {"properties": {"event_type": {"pattern": "^[a-z][a-z0-9_]*$"}}}
+    }
+  ],
+  "description": "One immutable, already-redacted event in a run trace.",
+  "properties": {
+    "data": {
+      "additionalProperties": {"$ref": "#/$defs/JsonValue"},
+      "title": "Data",
+      "type": "object"
+    },
+    "duration_ms": {
+      "anyOf": [{"minimum": 0, "type": "integer"}, {"type": "null"}],
+      "default": null,
+      "title": "Duration Ms"
+    },
+    "event_type": {
+      "minLength": 1,
+      "title": "Event Type",
+      "type": "string"
+    },
+    "invocation_id": {
+      "anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}],
+      "default": null,
+      "title": "Invocation Id"
+    },
+    "occurred_at": {"format": "date-time", "title": "Occurred At", "type": "string"},
+    "parent_invocation_id": {
+      "anyOf": [{"minLength": 1, "type": "string"}, {"type": "null"}],
+      "default": null,
+      "title": "Parent Invocation Id"
+    },
+    "schema_version": {
+      "default": 1,
+      "enum": [1, 2],
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "sequence": {"minimum": 0, "title": "Sequence", "type": "integer"},
+    "trace_id": {"format": "uuid", "title": "Trace Id", "type": "string"}
+  },
+  "required": ["trace_id", "sequence", "event_type", "occurred_at"],
+  "title": "TraceEvent",
+  "type": "object"
+}

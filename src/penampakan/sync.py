@@ -409,6 +409,7 @@ class Penampakan:
         trace_sinks: Sequence[TraceSink] = (),
         owns_policy: bool = False,
         owns_llm: bool = False,
+        owns_trace_sinks: bool = False,
     ) -> None:
         module = importlib.import_module("penampakan.client")
         factory = cast(Callable[..., _AsyncClient], module.AsyncPenampakan)
@@ -421,6 +422,7 @@ class Penampakan:
             trace_sinks=trace_sinks,
             owns_policy=owns_policy,
             owns_llm=owns_llm,
+            owns_trace_sinks=owns_trace_sinks,
         )
         self._client = client
         self._bridge = _ClientBridge(client)

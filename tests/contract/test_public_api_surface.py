@@ -40,13 +40,13 @@ _OPTIONAL_PACKAGES = (
     "huggingface_hub",
     "litellm",
     "openai",
+    "opentelemetry",
     "pytesseract",
     "torch",
     "transformers",
 )
 
-# Documented tier-2 namespaces. ``penampakan.tracing.sinks`` is deliberately
-# absent: specification 08 owns it and it has not shipped.
+# Documented tier-2 namespaces.
 _NAMESPACES = (
     "penampakan.backends",
     "penampakan.evaluation",
@@ -58,6 +58,7 @@ _NAMESPACES = (
     "penampakan.reasoning",
     "penampakan.tools",
     "penampakan.tracing",
+    "penampakan.trace_sinks",
 )
 
 _BLOCKER = """

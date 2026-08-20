@@ -29,6 +29,9 @@ def sentinel_payload() -> tuple[dict[str, object], tuple[str, ...]]:
         "bytes-secret-sentinel",
         "backend-secret-sentinel",
         "api-key-secret-sentinel",
+        "tool-arguments-secret-sentinel",
+        "model-output-secret-sentinel",
+        "verifier-reason-secret-sentinel",
     )
     payload: dict[str, object] = {
         "path": sentinels[0],
@@ -40,6 +43,9 @@ def sentinel_payload() -> tuple[dict[str, object], tuple[str, ...]]:
         "image_bytes": sentinels[6].encode(),
         "backend_exception": RuntimeError(sentinels[7]),
         "api_key": sentinels[8],
+        "tool_arguments": {"query": sentinels[9]},
+        "raw_model_output": sentinels[10],
+        "verifier_reason": sentinels[11],
         "nested": {
             "source_path": sentinels[0],
             "user_question": sentinels[1],
@@ -118,9 +124,13 @@ def test_content_opt_ins_never_allow_credentials_prompts_or_image_bytes() -> Non
     assert redacted["ocr_text"] == sentinels[2]
     assert redacted["caption"] == sentinels[3]
     assert redacted["answer"] == sentinels[5]
+    assert redacted["raw_model_output"] == sentinels[10]
+    assert redacted["verifier_reason"] == sentinels[11]
     assert "prompt" not in redacted
     assert "image_bytes" not in redacted
     assert "api_key" not in redacted
+    assert "tool_arguments" not in redacted
     assert sentinels[4] not in repr(redacted)
     assert sentinels[6] not in repr(redacted)
     assert sentinels[8] not in repr(redacted)
+    assert sentinels[9] not in repr(redacted)

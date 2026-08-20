@@ -230,3 +230,105 @@ async def test_start_finish_and_close_are_idempotent() -> None:
     await builder.aclose()
 
     assert sink.close_count == 1
+
+
+async def test_v2_invocations_correlate_nested_operations_and_terminal_summary() -> None:
+    builder = TraceBuilder(trace_id=TRACE_ID)
+    await builder.start({"operation": "inspect"})
+    tool = await builder.start_invocation("tool_call", {"tool_name": "read_text"})
+    backend = await builder.start_invocation(
+        "backend_call",
+        {"backend_name": "local"},
+    )
+    await backend.finish(outcome="ok")
+    await tool.finish(outcome="ok")
+    trace = await builder.finish()
+
+    assert all(event.schema_version == 2 for event in trace.events)
+    starts = {
+        event.invocation_id: event
+        for event in trace.events
+        if event.event_type in {"tool_call_started", "backend_call_started"}
+    }
+    finishes = {
+        event.invocation_id: event
+        for event in trace.events
+        if event.event_type.endswith("_finished") and event.event_type != "run_finished"
+    }
+    assert starts.keys() == finishes.keys()
+    assert starts[tool.invocation_id].parent_invocation_id == builder.run_invocation_id
+    assert starts[backend.invocation_id].parent_invocation_id == tool.invocation_id
+    terminal = trace.events[-1]
+    assert terminal.invocation_id == builder.run_invocation_id
+    assert terminal.data["backend_calls"] == 1
+    assert terminal.data["tool_calls"] == 1
+    assert terminal.data["stop_reason"] == "completed"
+
+
+async def test_invocation_context_maps_failure_without_exception_content() -> None:
+    builder = TraceBuilder(trace_id=TRACE_ID)
+
+    with pytest.raises(RuntimeError, match="secret sentinel"):
+        async with await builder.start_invocation("verification"):
+            raise RuntimeError("secret sentinel")
+
+    finish = builder.events[-1]
+    assert finish.event_type == "verification_finished"
+    assert finish.data == {"error": {"error_type": "RuntimeError"}, "outcome": "error"}
+    assert "secret sentinel" not in finish.model_dump_json()
+
+
+async def test_finalization_finishes_active_invocations_before_terminal_event() -> None:
+    builder = TraceBuilder(trace_id=TRACE_ID)
+    invocation = await builder.start_invocation("backend_call", {"backend_name": "local"})
+
+    trace = await builder.cancel()
+
+    assert tuple(event.event_type for event in trace.events) == (
+        "run_started",
+        "backend_call_started",
+        "backend_call_finished",
+        "run_finished",
+    )
+    finish = trace.events[-2]
+    assert finish.invocation_id == invocation.invocation_id
+    assert finish.data["outcome"] == "cancelled"
+    assert await invocation.finish(outcome="ok") is finish
+    assert builder.events == trace.events
+
+
+async def test_late_invocation_cleanup_from_another_task_observes_forced_finish() -> None:
+    builder = TraceBuilder(trace_id=TRACE_ID)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def own_invocation() -> TraceEvent:
+        invocation = await builder.start_invocation("backend_call")
+        started.set()
+        await release.wait()
+        return await invocation.finish(outcome="ok")
+
+    owner = asyncio.create_task(own_invocation())
+    await started.wait()
+    trace = await builder.cancel()
+    release.set()
+
+    assert await owner is trace.events[-2]
+    assert trace.events[-2].data["outcome"] == "cancelled"
+    assert trace.events[-1].event_type == "run_finished"
+
+
+def test_legacy_event_types_remain_parseable_but_v2_requires_snake_case() -> None:
+    payload = {
+        "trace_id": TRACE_ID,
+        "sequence": 0,
+        "event_type": "backend.completed",
+        "occurred_at": datetime(2026, 2, 10, 9, 0, tzinfo=timezone.utc),
+    }
+
+    legacy = TraceEvent.model_validate(payload)
+
+    assert legacy.schema_version == 1
+    assert legacy.event_type == "backend.completed"
+    with pytest.raises(ValueError, match="lower snake case"):
+        TraceEvent.model_validate({**payload, "schema_version": 2})

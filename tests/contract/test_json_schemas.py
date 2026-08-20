@@ -1,5 +1,6 @@
 import json
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -15,11 +16,13 @@ from penampakan.models import (
     PolicyAction,
     SegmentationRequest,
     ToolAction,
+    TraceEvent,
     VisionRequest,
 )
 
 VISION_REQUEST_ADAPTER = TypeAdapter(VisionRequest)
 POLICY_ACTION_ADAPTER = TypeAdapter(PolicyAction)
+TRACE_EVENT_SCHEMA_SNAPSHOT = Path(__file__).with_name("trace_event_v2_schema.json")
 
 VISION_REQUEST_CASES = (
     (MetadataRequest, {"capability": "metadata"}),
@@ -117,6 +120,11 @@ POLICY_ACTION_CASES = (
 
 def encode_json(value: object) -> str:
     return json.dumps(value, allow_nan=False, ensure_ascii=False, separators=(",", ":"))
+
+
+def test_trace_event_v2_schema_matches_golden_snapshot() -> None:
+    expected = json.loads(TRACE_EVENT_SCHEMA_SNAPSHOT.read_text(encoding="utf-8"))
+    assert TraceEvent.model_json_schema() == expected
 
 
 def object_schemas(value: Any, path: str = "$") -> Iterator[tuple[str, dict[str, Any]]]:

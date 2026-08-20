@@ -40,8 +40,9 @@ immutable snapshots; closing a session releases its private pixels and stores.
 
 Ownership follows constructor boundaries, not Python variable ownership:
 
-- An `AsyncPenampakan`/`Penampakan` client owns every registered vision backend,
-  its selected cache, and its trace sinks. It closes them; the same backend
+- An `AsyncPenampakan`/`Penampakan` client owns every registered vision backend
+  and its selected cache. Caller-supplied trace sinks remain caller-owned unless
+  `owns_trace_sinks=True` transfers close responsibility. The same backend
   instance cannot be shared across live clients.
 - A caller-supplied `ActionPolicy` is caller-owned by default. Set
   `owns_policy=True` to transfer close responsibility to the client.
@@ -58,8 +59,8 @@ Ownership follows constructor boundaries, not Python variable ownership:
   process that wrote it.
 
 Client shutdown first drains active operations, then closes sessions,
-single-flight work, backends, an owned policy/LLM, the cache, and finally trace
-sinks. Cleanup is idempotent and attempts every owned resource. Closing the
+single-flight work, backends, an owned policy/LLM, the cache, and finally owned
+trace sinks. Cleanup is idempotent and attempts every owned resource. Closing the
 durable cache runs the work already queued ahead of the close, closes the
 connection on the thread that created it, and stops that thread; work queued
 after that point is reported to its caller as unreachable rather than left

@@ -78,6 +78,7 @@ def _metadata_errors(raw: bytes, artifact: Path) -> list[str]:
         "litellm",
         "ocr",
         "openai",
+        "opentelemetry",
         "providers",
         "transformers",
     }

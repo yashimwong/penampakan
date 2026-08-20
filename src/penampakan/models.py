@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -645,11 +646,30 @@ class TraceSummary(_FrozenModel):
 class TraceEvent(_FrozenModel):
     """One immutable, already-redacted event in a run trace."""
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {"schema_version": {"const": 2}},
+                        "required": ["schema_version"],
+                    },
+                    "then": {"properties": {"event_type": {"pattern": r"^[a-z][a-z0-9_]*$"}}},
+                }
+            ]
+        }
+    )
+
+    # The default exists for backward parsing and direct legacy construction.
+    # TraceBuilder explicitly stamps every newly emitted event as schema v2.
+    schema_version: Literal[1, 2] = 1
     trace_id: UUID
     sequence: Annotated[int, Field(ge=0)]
     event_type: _CleanText
     occurred_at: datetime
     duration_ms: Annotated[int, Field(ge=0)] | None = None
+    invocation_id: _CleanText | None = None
+    parent_invocation_id: _CleanText | None = None
     data: dict[str, JsonValue] = Field(default_factory=dict)
 
     @field_validator("occurred_at")
@@ -661,6 +681,12 @@ class TraceEvent(_FrozenModel):
     @classmethod
     def _validate_data(cls, value: dict[str, JsonValue]) -> dict[str, JsonValue]:
         return _json_mapping(value)
+
+    @model_validator(mode="after")
+    def _validate_versioned_event_type(self) -> TraceEvent:
+        if self.schema_version == 2 and not re.fullmatch(r"[a-z][a-z0-9_]*", self.event_type):
+            raise ValueError("schema-v2 event_type must use lower snake case")
+        return self
 
 
 def _validate_utc(value: datetime) -> datetime:

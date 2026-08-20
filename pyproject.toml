@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "penampakan"
-version = "0.5.0"
+version = "0.6.0"
 description = "Safe visual tool orchestration for text-only language models"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
@@ -43,6 +43,11 @@ openai = ["openai>=2.54,<3"]
 anthropic = ["anthropic>=0.121,<1"]
 litellm = ["litellm>=1.96.2,<2"]
 providers = ["penampakan[anthropic,litellm,openai]"]
+opentelemetry = [
+  "opentelemetry-api==1.44.0",
+  "opentelemetry-sdk==1.44.0",
+  "opentelemetry-semantic-conventions==0.65b0",
+]
 benchmark = [
   "imageio>=2.31",
   "matplotlib>=3.8",

@@ -69,6 +69,7 @@ def test_distribution_metadata_declares_dependencies_and_extras() -> None:
         "litellm",
         "ocr",
         "openai",
+        "opentelemetry",
         "providers",
         "transformers",
     }
@@ -99,6 +100,22 @@ def test_distribution_metadata_declares_bounded_provider_extras() -> None:
         item.marker is not None and 'extra == "providers"' in str(item.marker)
         for item in dependencies
     )
+
+
+def test_distribution_metadata_pins_opentelemetry_extra() -> None:
+    dependencies = tuple(Requirement(item) for item in requires("penampakan") or ())
+    expected = {
+        "opentelemetry-api": SpecifierSet("==1.44.0"),
+        "opentelemetry-sdk": SpecifierSet("==1.44.0"),
+        "opentelemetry-semantic-conventions": SpecifierSet("==0.65b0"),
+    }
+
+    selected = {
+        item.name.lower(): item.specifier
+        for item in dependencies
+        if item.marker is not None and 'extra == "opentelemetry"' in str(item.marker)
+    }
+    assert selected == expected
 
 
 def test_distribution_contains_typing_marker() -> None:

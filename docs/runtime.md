@@ -73,18 +73,45 @@ until an ordered multi-image contract ships.
 
 Every completed operation returns a `RunTrace`. Its `TraceSummary` contains a
 UUIDv4 trace ID, UTC start time, duration, LLM/tool/backend/cache/asset counters,
-optional provider token totals, and a stop reason. Each ordered `TraceEvent`
-contains the same trace ID, a strictly increasing sequence, UTC occurrence time,
-an optional duration, an event type, and strict JSON data. The exact public
+optional provider token totals, and a stop reason. Newly emitted `TraceEvent`s
+use schema version 2 and contain the same trace ID, a strictly increasing
+sequence, UTC occurrence time, an optional duration, opaque invocation and
+parent-invocation IDs, an event type, and strict JSON data. Policy, tool,
+backend, and verification starts have exactly one correlated finish. Correlation
+uses IDs, never sequence adjacency. Terminal events repeat all summary counters,
+including token totals, so streaming sinks are self-contained. The exact public
 schema comes from [`TraceEvent` and related models](../src/penampakan/models.py).
+
+An absent `schema_version` parses as legacy v1. Only events explicitly marked v2
+have correlation guarantees. Readers must reject unsupported future versions or
+retain their JSON opaquely; they must not reinterpret them as v2.
 
 Event types cover run start/finish/failure, image load, initial planning, policy
 calls, invalid actions, tool/backend calls, cache hits, asset creation,
 observation commit, budget stops, and answer validation. Sinks passed through
 `trace_sinks=` receive immutable events after redaction; sink failure does not
-expose content and is represented as a safe warning. The returned `RunTrace` is
-the in-memory record. A custom JSONL or telemetry sink chooses its own durable
-storage and access policy and is closed by the client.
+expose content and is represented as a safe warning. Caller-supplied sinks are
+caller-owned and remain open when the client closes. Pass
+`owns_trace_sinks=True` only when the client should drain and close them after
+all sessions and other owned resources.
+
+Three destinations ship with the library:
+
+- `InMemoryTraceSink` retains bounded whole completed runs for tests and notebooks.
+- `JsonlTraceSink` uses one bounded queue and writer task, private `0700`/`0600`
+  artifacts where POSIX modes apply, bounded rotation, and optional fsync. Its
+  default `drop_new` overflow never waits and exposes loss through `stats()` and
+  a safe warning; `block` explicitly enables backpressure. It is safe for
+  concurrent sessions in one process only. Sharing its path between processes
+  is unsupported because it provides no cross-process lock.
+- `OpenTelemetryTraceSink` requires the `opentelemetry` extra and an injected
+  tracer provider. It never configures global telemetry state. CI exercises API
+  and SDK 1.44.0 with semantic conventions 0.65b0.
+
+JSONL is durable plaintext retention and is not encryption. Operators choose its
+access controls, backups, rotation, and deletion policy. Symbolic links in any
+configured path component are refused by default; opting in accepts the
+platform's link race limitations.
 
 Default trace redaction excludes paths, questions, observation text, model
 output, and answers. `TraceContentPolicy` opts those categories in independently.

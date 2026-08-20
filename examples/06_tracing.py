@@ -6,44 +6,19 @@ from tempfile import TemporaryDirectory
 
 from PIL import Image
 
-from penampakan import Penampakan, TraceEvent
+from penampakan import InMemoryTraceSink, JsonlTraceSink, Penampakan
 from penampakan.tracing import redact_trace_data
 
 
-class MemorySink:
-    def __init__(self) -> None:
-        self.events: list[TraceEvent] = []
-
-    async def emit(self, event: TraceEvent) -> None:
-        self.events.append(event)
-
-    async def aclose(self) -> None:
-        return None
-
-
-class JsonlSink:
-    def __init__(self, path: Path) -> None:
-        self.stream = path.open("w", encoding="utf-8")
-
-    async def emit(self, event: TraceEvent) -> None:
-        self.stream.write(event.model_dump_json() + "\n")
-        self.stream.flush()
-
-    async def aclose(self) -> None:
-        self.stream.close()
-
-
 def main() -> None:
-    memory = MemorySink()
+    memory = InMemoryTraceSink()
     with TemporaryDirectory() as directory:
         path = Path(directory) / "trace.jsonl"
         with (
             Image.new("RGB", (24, 16), "gold") as image,
             Penampakan(
-                trace_sinks=(
-                    memory,
-                    JsonlSink(path),
-                )
+                trace_sinks=(memory, JsonlTraceSink(path)),
+                owns_trace_sinks=True,
             ) as vision,
         ):
             vision.inspect(image)

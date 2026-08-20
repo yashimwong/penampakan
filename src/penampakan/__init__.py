@@ -117,6 +117,15 @@ from penampakan.protocols import (
 )
 from penampakan.session import AsyncVisionSession
 from penampakan.sync import Penampakan, VisionSession
+from penampakan.trace_sinks import (
+    InMemoryTraceSink,
+    InMemoryTraceSinkStats,
+    JsonlTraceSink,
+    JsonlTraceSinkStats,
+    OpenTelemetryTraceSink,
+    OpenTelemetryTraceSinkStats,
+    OpenTelemetryUnavailableError,
+)
 
 __all__ = (
     "ActionPolicy",
@@ -162,6 +171,8 @@ __all__ = (
     "ImageLimitExceededError",
     "ImageLimits",
     "ImageSource",
+    "InMemoryTraceSink",
+    "InMemoryTraceSinkStats",
     "InspectionFailedError",
     "InspectionOperation",
     "InspectionPlan",
@@ -170,6 +181,8 @@ __all__ = (
     "InvalidImageError",
     "InvalidModelActionError",
     "JsonValue",
+    "JsonlTraceSink",
+    "JsonlTraceSinkStats",
     "LLMCallLimitExceededError",
     "LLMError",
     "LLMNotConfiguredError",
@@ -185,6 +198,9 @@ __all__ = (
     "ObservationDraft",
     "ObservationNotFoundError",
     "ObservationPayload",
+    "OpenTelemetryTraceSink",
+    "OpenTelemetryTraceSinkStats",
+    "OpenTelemetryUnavailableError",
     "OperationTimeoutError",
     "Penampakan",
     "PenampakanError",

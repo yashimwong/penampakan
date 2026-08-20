@@ -59,7 +59,7 @@ from penampakan.perception.cache import (
 )
 from penampakan.perception.normalize import NormalizationLimits, normalize_backend_result
 from penampakan.perception.registry import ToolRegistry, ToolResult
-from penampakan.perception.router import BackendRouter, RouteResult
+from penampakan.perception.router import BackendRouter, RouteAttempt, RouteResult
 from penampakan.perception.store import ObservationStore, ProvenanceSpec
 from penampakan.protocols import ActionPolicy, Cache, TraceSink
 from penampakan.reasoning._metrics import collect_policy_call
@@ -67,7 +67,7 @@ from penampakan.reasoning.actions import ActionParseError
 from penampakan.reasoning.answer import materialize_answer, validate_evidence
 from penampakan.reasoning.budget import RunBudget
 from penampakan.reasoning.context import CompiledContext, ContextCompiler
-from penampakan.tracing import TraceBuilder
+from penampakan.tracing import TraceBuilder, _InvocationContext
 
 _PREPROCESSING_VERSION = "normalize-v2"
 # A policy reports typed degradation, not free-form warnings; the bound keeps a
@@ -207,6 +207,7 @@ class AsyncVisionSession:
         self._active_budget: RunBudget | None = None
         self._active_trace: TraceBuilder | None = None
         self._active_tool_name: str | None = None
+        self._selected_policy_invocation_id: str | None = None
         self._last_perception: _PerceptionOutcome | None = None
         self._previous_answer_observation_ids: tuple[str, ...] = ()
 
@@ -517,20 +518,35 @@ class AsyncVisionSession:
                 )
                 break
             tool_name = self._tool_name(capability)
-            await trace.emit(
-                "tool_call_started",
+            invocation = await trace.start_invocation(
+                "tool_call",
                 {
                     "tool_name": tool_name,
                     "asset_id": self._assets.root_id,
                     "request_hash": self._request_hash(request),
                 },
+                parent_invocation_id=trace.run_invocation_id,
             )
-            outcome = await self._perceive(
-                self._assets.root_id,
-                request,
-                tool_name=tool_name,
-                budget=budget,
-                trace=trace,
+            try:
+                outcome = await self._perceive(
+                    self._assets.root_id,
+                    request,
+                    tool_name=tool_name,
+                    budget=budget,
+                    trace=trace,
+                )
+            except asyncio.CancelledError as error:
+                await invocation.finish(outcome="cancelled", error=error)
+                raise
+            except Exception as error:
+                await invocation.finish(outcome="error", error=error)
+                raise
+            except BaseException as error:
+                await invocation.finish(outcome="error", error=error)
+                raise
+            await invocation.finish(
+                outcome="cache_hit" if outcome.provenance.cache_hit else "ok",
+                data={"tool_name": tool_name},
             )
             committed = self._observations.commit_result(
                 self._assets.root_id,
@@ -605,14 +621,15 @@ class AsyncVisionSession:
             raise LLMNotConfiguredError()
         final_reservation = answer_only if budget_final is None else budget_final
         await budget.reserve_llm_call(final=final_reservation, repair=repair)
-        await trace.emit(
-            "policy_call_started",
+        invocation = await trace.start_invocation(
+            "policy_call",
             {
                 "answer_only": answer_only,
                 "repair": repair,
                 "included_observation_ids": list(context.visible_observation_ids),
                 "omitted_observation_ids": list(context.omitted_observation_ids),
             },
+            parent_invocation_id=trace.run_invocation_id,
         )
         policy_input = PolicyInput(
             question=question,
@@ -631,15 +648,30 @@ class AsyncVisionSession:
                     timeout=budget.component_timeout(self._settings.run.llm_timeout_s),
                 )
         except asyncio.TimeoutError as error:
-            raise LLMError(code="llm_timeout", cause=error) from error
-        except ActionParseError as error:
-            await trace.emit(
-                "policy_call_finished",
-                {"action_type": "invalid", "repair": repair, **metrics.as_trace_data()},
+            timeout_error = LLMError(code="llm_timeout", cause=error)
+            await invocation.finish(
+                outcome="timeout",
+                data={"repair": repair, **metrics.as_trace_data()},
+                error=timeout_error,
             )
+            raise timeout_error from error
+        except asyncio.CancelledError as error:
+            await invocation.finish(
+                outcome="cancelled",
+                data={"repair": repair, **metrics.as_trace_data()},
+                error=error,
+            )
+            raise
+        except ActionParseError as error:
             await trace.emit(
                 "invalid_action",
                 {"code": "invalid_model_action", "repair": repair},
+                parent_invocation_id=invocation.invocation_id,
+            )
+            await invocation.finish(
+                outcome="refused",
+                data={"action_type": "invalid", "repair": repair, **metrics.as_trace_data()},
+                error=error,
             )
             if repair:
                 raise InvalidModelActionError(cause=error) from error
@@ -658,14 +690,27 @@ class AsyncVisionSession:
                 )
             except LLMCallLimitExceededError as limit_error:
                 raise InvalidModelActionError(cause=limit_error) from limit_error
+        except Exception as error:
+            await invocation.finish(
+                outcome="error",
+                data={"repair": repair, **metrics.as_trace_data()},
+                error=error,
+            )
+            raise
+        except BaseException as error:
+            await invocation.finish(outcome="error", error=error)
+            raise
         if not isinstance(action, (ToolAction, AnswerAction)):
-            raise InvalidModelActionError(code="invalid_policy_action")
-        await trace.emit(
-            "policy_call_finished",
+            invalid_error = InvalidModelActionError(code="invalid_policy_action")
+            await invocation.finish(outcome="error", error=invalid_error)
+            raise invalid_error
+        await invocation.finish(
+            outcome="ok",
             # Provider attempts and token counts feed the trace counters, so a
             # retried provider call is visible in budgets and cost reports.
-            {"action_type": action.type, "repair": repair, **metrics.as_trace_data()},
+            data={"action_type": action.type, "repair": repair, **metrics.as_trace_data()},
         )
+        self._selected_policy_invocation_id = invocation.invocation_id
         return action
 
     async def _complete_answer(
@@ -681,12 +726,10 @@ class AsyncVisionSession:
         final_call: bool,
     ) -> VisionAnswer:
         try:
-            validate_evidence(
+            await self._validate_evidence_traced(
                 action,
-                self._observations.snapshots(),
+                trace,
                 visible_observation_ids=context.visible_observation_ids,
-                root_asset_id=self._assets.root_id,
-                asset_root_ids=self._asset_root_ids(),
             )
         except EvidenceValidationError as error:
             feedback = (
@@ -713,12 +756,10 @@ class AsyncVisionSession:
             if not isinstance(repaired, AnswerAction):
                 raise EvidenceValidationError(cause=error) from error
             try:
-                validate_evidence(
+                await self._validate_evidence_traced(
                     repaired,
-                    self._observations.snapshots(),
+                    trace,
                     visible_observation_ids=context.visible_observation_ids,
-                    root_asset_id=self._assets.root_id,
-                    asset_root_ids=self._asset_root_ids(),
                 )
             except EvidenceValidationError as second_error:
                 raise EvidenceValidationError(cause=second_error) from second_error
@@ -742,6 +783,41 @@ class AsyncVisionSession:
             warnings=(*warnings, *self._policy_degradations(warnings), *trace.warnings),
             trace=completed_trace,
         )
+
+    async def _validate_evidence_traced(
+        self,
+        action: AnswerAction,
+        trace: TraceBuilder,
+        *,
+        visible_observation_ids: tuple[str, ...],
+    ) -> None:
+        """Validate one answer under a correlated verification invocation."""
+        invocation = await trace.start_invocation(
+            "verification",
+            {"evidence_count": len(action.evidence)},
+            parent_invocation_id=trace.run_invocation_id,
+        )
+        try:
+            validate_evidence(
+                action,
+                self._observations.snapshots(),
+                visible_observation_ids=visible_observation_ids,
+                root_asset_id=self._assets.root_id,
+                asset_root_ids=self._asset_root_ids(),
+            )
+        except asyncio.CancelledError as error:
+            await invocation.finish(outcome="cancelled", error=error)
+            raise
+        except EvidenceValidationError as error:
+            await invocation.finish(outcome="refused", error=error)
+            raise
+        except Exception as error:
+            await invocation.finish(outcome="error", error=error)
+            raise
+        except BaseException as error:
+            await invocation.finish(outcome="error", error=error)
+            raise
+        await invocation.finish(outcome="ok", data={"status": action.status})
 
     def _policy_degradations(
         self,
@@ -819,13 +895,14 @@ class AsyncVisionSession:
                 reserved_assets,
                 parent_depth=parent.derivation_depth,
             )
-        await trace.emit(
-            "tool_call_started",
+        invocation = await trace.start_invocation(
+            "tool_call",
             {
                 "tool_name": action.tool,
                 "asset_id": asset_id,
                 "action_hash": self._canonical_tool_call(action),
             },
+            parent_invocation_id=(self._selected_policy_invocation_id or trace.run_invocation_id),
         )
         self._active_budget = budget
         self._active_trace = trace
@@ -836,8 +913,9 @@ class AsyncVisionSession:
         except asyncio.CancelledError:
             if reserved_assets:
                 await budget.refund_reused_assets(reserved_assets)
+            await invocation.finish(outcome="cancelled")
             raise
-        except Exception:
+        except Exception as error:
             if reserved_assets:
                 await budget.refund_reused_assets(reserved_assets)
             warning_observation = await self._commit_reasoning_warning(
@@ -851,11 +929,18 @@ class AsyncVisionSession:
                 message="A requested visual tool failed safely.",
                 details={"tool_name": action.tool},
             )
+            await invocation.finish(outcome="error", error=error)
             return (warning_observation,), (warning_info,), ()
+        except BaseException as error:
+            if reserved_assets:
+                await budget.refund_reused_assets(reserved_assets)
+            await invocation.finish(outcome="error", error=error)
+            raise
         finally:
             self._active_budget = None
             self._active_trace = None
             self._active_tool_name = None
+        await invocation.finish(outcome="ok", data={"tool_name": action.tool})
         if result.assets:
             commits = self._assets.commit(asset_id, result.assets)
             reused = sum(commit.reused for commit in commits)
@@ -1268,21 +1353,36 @@ class AsyncVisionSession:
                     ),
                 )
             await budget.reserve_tool_call()
-            await trace.emit(
-                "tool_call_started",
+            invocation = await trace.start_invocation(
+                "tool_call",
                 {
                     "tool_name": planned.tool_name,
                     "asset_id": asset_id,
                     "request_hash": self._request_hash(operation.request),
                 },
+                parent_invocation_id=trace.run_invocation_id,
             )
-            perception = await self._perceive(
-                asset_id,
-                operation.request,
-                tool_name=planned.tool_name,
-                budget=budget,
-                trace=trace,
-                backend_name=operation.backend,
+            try:
+                perception = await self._perceive(
+                    asset_id,
+                    operation.request,
+                    tool_name=planned.tool_name,
+                    budget=budget,
+                    trace=trace,
+                    backend_name=operation.backend,
+                )
+            except asyncio.CancelledError as error:
+                await invocation.finish(outcome="cancelled", error=error)
+                raise
+            except Exception as error:
+                await invocation.finish(outcome="error", error=error)
+                raise
+            except BaseException as error:
+                await invocation.finish(outcome="error", error=error)
+                raise
+            await invocation.finish(
+                outcome="cache_hit" if perception.provenance.cache_hit else "ok",
+                data={"tool_name": planned.tool_name},
             )
             return _OperationOutcome(planned=planned, perception=perception)
         except asyncio.CancelledError:
@@ -1353,11 +1453,13 @@ class AsyncVisionSession:
 
         async def populate() -> SharedPerception:
             nonlocal route_result
+            active_backend_invocation: _InvocationContext | None = None
 
             async def before_attempt(descriptor: BackendDescriptor) -> None:
+                nonlocal active_backend_invocation
                 await budget.reserve_backend_call()
-                await trace.emit(
-                    "backend_call_started",
+                active_backend_invocation = await trace.start_invocation(
+                    "backend_call",
                     {
                         "asset_id": asset_id,
                         "backend_name": descriptor.name,
@@ -1366,13 +1468,52 @@ class AsyncVisionSession:
                     },
                 )
 
-            route_result = await self._router.analyze(
-                image,
-                request,
-                backend_name=backend_name,
-                timeout_s=budget.component_timeout(self._settings.run.backend_timeout_s),
-                before_attempt=before_attempt,
-            )
+            async def after_attempt(attempt: RouteAttempt) -> None:
+                nonlocal active_backend_invocation
+                invocation = active_backend_invocation
+                active_backend_invocation = None
+                if invocation is None:
+                    return
+                outcome = attempt.outcome
+                if outcome == "success":
+                    await invocation.finish(
+                        outcome="ok",
+                        data={"backend_name": attempt.backend_name},
+                    )
+                elif outcome == "timeout":
+                    await invocation.finish(
+                        outcome="timeout",
+                        data={
+                            "backend_name": attempt.backend_name,
+                            "error_code": attempt.error_code,
+                        },
+                    )
+                elif outcome == "cancelled":
+                    await invocation.finish(
+                        outcome="cancelled",
+                        data={"backend_name": attempt.backend_name},
+                    )
+                else:
+                    await invocation.finish(
+                        outcome="error",
+                        data={
+                            "backend_name": attempt.backend_name,
+                            "error_code": attempt.error_code,
+                        },
+                    )
+
+            try:
+                route_result = await self._router.analyze(
+                    image,
+                    request,
+                    backend_name=backend_name,
+                    timeout_s=budget.component_timeout(self._settings.run.backend_timeout_s),
+                    before_attempt=before_attempt,
+                    after_attempt=after_attempt,
+                )
+            finally:
+                if active_backend_invocation is not None:
+                    await active_backend_invocation.finish(outcome="error")
             normalized = normalize_backend_result(
                 route_result.result,
                 request,
@@ -1408,16 +1549,6 @@ class AsyncVisionSession:
             duration_ms = sum(attempt.duration_ms for attempt in route_result.attempts)
             route_warnings = route_result.warnings
             cache_hit = False
-            for attempt in route_result.attempts:
-                await trace.emit(
-                    "backend_call_finished",
-                    {
-                        "backend_name": attempt.backend_name,
-                        "outcome": attempt.outcome,
-                        "error_code": attempt.error_code,
-                    },
-                    duration_ms=attempt.duration_ms,
-                )
         warnings = self._with_unresolved_revision_warning(
             descriptor,
             (

@@ -44,6 +44,7 @@ python -m pip install 'penampakan[openai]'
 python -m pip install 'penampakan[anthropic]'
 python -m pip install 'penampakan[litellm]'
 python -m pip install 'penampakan[providers]'
+python -m pip install 'penampakan[opentelemetry]'
 ```
 
 The OCR extra installs the Python adapter; the Tesseract executable must also
@@ -186,6 +187,28 @@ client = AsyncPenampakan(policy=policy, owns_policy=True)
 Retry counts and token usage from every provider call appear in the run trace, so
 a retried call is visible in budgets and cost reports even though it consumes one
 orchestrator language-model reservation.
+
+Schema-v2 traces correlate policy, tool, backend, and verification spans with
+opaque invocation IDs. Bounded sinks are available from the base package:
+
+```python
+from pathlib import Path
+
+from penampakan import AsyncPenampakan, InMemoryTraceSink, JsonlTraceSink
+
+memory = InMemoryTraceSink(max_runs=20)
+jsonl = JsonlTraceSink(Path("/var/lib/my-app/penampakan.jsonl"))
+vision = AsyncPenampakan(
+    trace_sinks=(memory, jsonl),
+    owns_trace_sinks=True,
+)
+```
+
+Caller-supplied sinks otherwise remain open after client close. JSONL is a
+plaintext retention destination, uses non-blocking `drop_new` overflow by
+default, and supports concurrent sessions only within one process. The optional
+`OpenTelemetryTraceSink` takes an injected provider and never configures global
+telemetry state. See [runtime tracing and retention](docs/runtime.md#tracing-and-retention).
 
 `LiteLLMTextLLM` requires an explicit opt-in before it will degrade:
 

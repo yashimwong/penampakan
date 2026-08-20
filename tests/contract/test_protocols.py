@@ -264,7 +264,7 @@ async def test_trace_sink_receives_typed_redacted_event() -> None:
     event = TraceEvent(
         trace_id=UUID("00000000-0000-0000-0000-000000000001"),
         sequence=1,
-        event_type="backend.completed",
+        event_type="backend_completed",
         occurred_at=datetime(2026, 2, 10, 9, 0, tzinfo=timezone.utc),
         duration_ms=5,
         data={"backend": "example.metadata"},

@@ -30,7 +30,9 @@ from penampakan.models import (
 )
 from penampakan.protocols import VisionBackend
 
-AttemptOutcome = Literal["success", "error", "retryable_error", "timeout", "unavailable"]
+AttemptOutcome = Literal[
+    "success", "error", "retryable_error", "timeout", "unavailable", "cancelled"
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -213,6 +215,7 @@ class BackendRouter:
         backend_name: str | None = None,
         timeout_s: float | None = None,
         before_attempt: Callable[[BackendDescriptor], Awaitable[None]] | None = None,
+        after_attempt: Callable[[RouteAttempt], Awaitable[None]] | None = None,
     ) -> RouteResult:
         """Analyze through deterministic fallback while preserving safe attempt data."""
         await self._begin_call()
@@ -239,6 +242,13 @@ class BackendRouter:
                         )
                 except asyncio.CancelledError:
                     await self._cancel_invocation(invocation)
+                    cancelled_attempt = RouteAttempt(
+                        descriptor=descriptor,
+                        outcome="cancelled",
+                        duration_ms=self._duration_ms(started),
+                    )
+                    if after_attempt is not None:
+                        await after_attempt(cancelled_attempt)
                     raise
                 except _BackendCancelledError as error:
                     unexpected_error = BackendError(
@@ -253,6 +263,8 @@ class BackendRouter:
                         outcome="error",
                     )
                     attempts.append(attempt)
+                    if after_attempt is not None:
+                        await after_attempt(attempt)
                     warnings.append(self._fallback_warning(attempt))
                     self._attach_failure_metadata(unexpected_error, attempts, warnings)
                     raise unexpected_error from error.cause
@@ -270,6 +282,8 @@ class BackendRouter:
                         outcome="timeout",
                     )
                     attempts.append(attempt)
+                    if after_attempt is not None:
+                        await after_attempt(attempt)
                     warnings.append(self._fallback_warning(attempt))
                     if self._can_fallback(timeout_error, len(attempts), len(descriptors)):
                         continue
@@ -285,6 +299,8 @@ class BackendRouter:
                         outcome = "error"
                     attempt = self._failed_attempt(descriptor, error, started, outcome=outcome)
                     attempts.append(attempt)
+                    if after_attempt is not None:
+                        await after_attempt(attempt)
                     warnings.append(self._fallback_warning(attempt))
                     if self._can_fallback(error, len(attempts), len(descriptors)):
                         continue
@@ -298,6 +314,8 @@ class BackendRouter:
                         outcome="error",
                     )
                     attempts.append(attempt)
+                    if after_attempt is not None:
+                        await after_attempt(attempt)
                     warnings.append(self._fallback_warning(attempt))
                     self._attach_failure_metadata(error, attempts, warnings)
                     raise
@@ -314,16 +332,19 @@ class BackendRouter:
                         outcome="error",
                     )
                     attempts.append(attempt)
+                    if after_attempt is not None:
+                        await after_attempt(attempt)
                     warnings.append(self._fallback_warning(attempt))
                     self._attach_failure_metadata(unexpected_error, attempts, warnings)
                     raise unexpected_error from error
-                attempts.append(
-                    RouteAttempt(
-                        descriptor=descriptor,
-                        outcome="success",
-                        duration_ms=self._duration_ms(started),
-                    )
+                successful_attempt = RouteAttempt(
+                    descriptor=descriptor,
+                    outcome="success",
+                    duration_ms=self._duration_ms(started),
                 )
+                attempts.append(successful_attempt)
+                if after_attempt is not None:
+                    await after_attempt(successful_attempt)
                 return RouteResult(
                     result=result,
                     descriptor=descriptor,

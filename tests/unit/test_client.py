@@ -572,6 +572,7 @@ async def test_backend_cache_and_sink_close_failures_are_best_effort() -> None:
         backends=(backend,),
         cache=cache,
         trace_sinks=(failing_sink, succeeding_sink),
+        owns_trace_sinks=True,
     )
 
     await asyncio.gather(client.aclose(), client.aclose(), client.aclose())
@@ -586,6 +587,17 @@ async def test_backend_cache_and_sink_close_failures_are_best_effort() -> None:
     await successor.aclose()
 
     assert backend.close_calls == 2
+
+
+async def test_caller_owned_trace_sink_remains_open_after_client_close() -> None:
+    sink = RecordingSink()
+    client = AsyncPenampakan(trace_sinks=(sink,))
+
+    await client.aclose()
+
+    assert sink.close_calls == 0
+    await sink.aclose()
+    assert sink.close_calls == 1
 
 
 class RecordingCloser:

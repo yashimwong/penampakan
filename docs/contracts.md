@@ -104,6 +104,8 @@ logging or telemetry.
 | Metrics | `penampakan.evaluation` | Base | None; experimental pure diagnostics | Not applicable |
 | Image loading and geometry | `penampakan.image` | Base | None; pure functions over caller data | Returned assets are plain values |
 | Trace building and redaction | `penampakan.tracing` | Base | None; a builder holds only run-local state | Owned by the run that created it; caller-supplied `TraceSink`s stay caller-owned |
+| In-memory and JSONL trace sinks | `penampakan.trace_sinks` | Base | JSONL starts its writer lazily on first emit | Caller-owned unless `owns_trace_sinks=True`; close drains accepted JSONL events |
+| OpenTelemetry trace sink | `penampakan.trace_sinks` | `opentelemetry` | Validates the injected provider; never changes global OTel state | Caller-owned unless `owns_trace_sinks=True` |
 | Process-local cache implementations | `penampakan.perception.cache` | Base | None | Owned by the client that receives it; retains data until client close |
 | Durable SQLite cache | `penampakan.perception.sqlite_cache` | Base | Starts one worker thread, creates a private parent directory and database file, and opens the database; a path or data failure disables the instance instead of raising | Owned by the client that receives it; `aclose` drains queued work and stops the worker, but retained data outlives the process |
 
