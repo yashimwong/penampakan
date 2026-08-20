@@ -48,6 +48,26 @@ and colors are available from the built-in Pillow backend; metadata is
 authoritative, while compatible color backends can participate in normal
 preference/fallback routing.
 
+Set-of-Mark rendering is currently a programmatic transform, not one of those
+policy-callable tools. `penampakan.image.mark_regions` accepts trusted caller
+boxes, renders index-only badges by default, and records the input source as
+`caller_supplied`; it cannot create observations or evidence. Rendering is
+canonical and font-independent because numeric badges use built-in vector
+glyphs. It preserves RGB/RGBA mode and alpha, canonicalizes numbering after
+deduplication and spatial sorting, and drops marks that cannot receive a legible,
+non-overlapping badge rather than producing ambiguous overlap.
+
+The agent tool remains absent unless a session has localized detection or
+segmentation observations and a selected visual backend revision both advertises
+and passes a structured mark-reference contract. Free text that happens to
+mention a number does not satisfy that contract. No current first-party backend
+does, and a generic caption backend is not presumed to read rendered digits.
+This is distinct from the direct image input used by a capable multimodal model
+in the Set-of-Mark method. Consequently `agent-v1`, the default prompt, and the
+default first-party agent tool schema are unchanged. With a qualifying custom
+backend, `agent-v2` adds mark-specific evidence guidance only while the gated
+tools are actually exposed.
+
 Routing is deterministic: an explicit compatible override, configured
 preferences, then registration order. Optional fallback proceeds only through
 compatible backends and records every attempt and degradation. A backend's

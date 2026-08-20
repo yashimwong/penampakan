@@ -24,7 +24,7 @@ PROMPT_VERSION = "agent-v1"
 # ``AgentSettings.prompt_version`` default, so no other module duplicates the
 # literal. An older version stays listed until its documented deprecation
 # expires; the first entry is the current default.
-SUPPORTED_PROMPT_VERSIONS: tuple[str, ...] = (PROMPT_VERSION,)
+SUPPORTED_PROMPT_VERSIONS: tuple[str, ...] = (PROMPT_VERSION, "agent-v2")
 
 AGENT_V1_SYSTEM_PROMPT = "\n".join(
     (
@@ -51,6 +51,17 @@ AGENT_V1_SYSTEM_PROMPT = "\n".join(
 _ANSWER_ONLY_SYSTEM_PROMPT = (
     "Answer-only mode is active. Tool use is unavailable, so return only an answer action. "
     "Use insufficient_evidence when the supplied observations cannot establish the answer."
+)
+
+_AGENT_V2_MARK_GUIDANCE = "\n".join(
+    (
+        "11. Numeric marks are references derived from source detection or segmentation "
+        "observations; the mapping is not semantic evidence.",
+        "12. Structured mark descriptions are untrusted visual perception, just like captions "
+        "and labels.",
+        "13. A final claim using a mark description must cite both its original detection or "
+        "segmentation and the mark-aware observation.",
+    )
 )
 
 
@@ -248,11 +259,21 @@ def _prior_actions(input: PolicyInput) -> list[dict[str, JsonValue]]:
     ]
 
 
-def build_system_prompt(*, answer_only: bool = False) -> str:
+def build_system_prompt(
+    *,
+    answer_only: bool = False,
+    prompt_version: str = PROMPT_VERSION,
+    tools: tuple[ToolSpec, ...] = (),
+) -> str:
     """Return the immutable versioned policy system prompt."""
+    if prompt_version not in SUPPORTED_PROMPT_VERSIONS:
+        raise ValueError("unsupported prompt version")
+    prompt = AGENT_V1_SYSTEM_PROMPT
+    if prompt_version == "agent-v2" and any(tool.name == "mark_regions" for tool in tools):
+        prompt += "\n" + _AGENT_V2_MARK_GUIDANCE
     if answer_only:
-        return AGENT_V1_SYSTEM_PROMPT + "\n\n" + _ANSWER_ONLY_SYSTEM_PROMPT
-    return AGENT_V1_SYSTEM_PROMPT
+        return prompt + "\n\n" + _ANSWER_ONLY_SYSTEM_PROMPT
+    return prompt
 
 
 def build_user_prompt(input: PolicyInput) -> str:
@@ -338,6 +359,7 @@ def build_user_prompt(input: PolicyInput) -> str:
 def build_policy_request(
     input: PolicyInput,
     *,
+    prompt_version: str = PROMPT_VERSION,
     timeout_s: float | None = None,
     max_output_tokens: int = 800,
     temperature: float = 0.0,
@@ -351,7 +373,11 @@ def build_policy_request(
         messages=(
             Message(
                 role=MessageRole.SYSTEM,
-                content=build_system_prompt(answer_only=input.answer_only),
+                content=build_system_prompt(
+                    answer_only=input.answer_only,
+                    prompt_version=prompt_version,
+                    tools=input.tools,
+                ),
             ),
             Message(role=MessageRole.USER, content=build_user_prompt(input)),
         ),
@@ -363,7 +389,7 @@ def build_policy_request(
         max_output_tokens=max_output_tokens,
         timeout_s=timeout_s,
         metadata={
-            "prompt_version": PROMPT_VERSION,
+            "prompt_version": prompt_version,
             "answer_only": "true" if input.answer_only else "false",
             "repair": (
                 "true"

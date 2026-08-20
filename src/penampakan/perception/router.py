@@ -24,6 +24,7 @@ from penampakan.models import (
     BackendDescriptor,
     BackendImage,
     Capability,
+    CaptionRequest,
     VisionRequest,
     VisionResult,
     WarningInfo,
@@ -471,6 +472,17 @@ class BackendRouter:
 
     @staticmethod
     def _supports(entry: _BackendEntry, request: VisionRequest) -> bool:
+        if isinstance(request, CaptionRequest) and request.mark_indices:
+            caption = next(
+                (
+                    item
+                    for item in entry.descriptor.capabilities
+                    if item.capability is Capability.CAPTION
+                ),
+                None,
+            )
+            if caption is None or "caption.mark_references" not in caption.features:
+                return False
         try:
             supported = entry.backend.supports(request)
         except Exception as error:

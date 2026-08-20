@@ -242,7 +242,7 @@ async def test_constructor_configuration_validation() -> None:
     llm = MinimalTextLLM()
     policy = ScriptedPolicy(())
     unsupported = Settings(
-        agent=AgentSettings(prompt_version="agent-v2"),
+        agent=AgentSettings(prompt_version="agent-v3"),
     )
     cases: tuple[tuple[dict[str, object], str], ...] = (
         ({"settings": object()}, "invalid_settings"),

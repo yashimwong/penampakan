@@ -23,6 +23,29 @@ Released 2026-08-20
   explicit opt-in for linked destinations.
 - Caller-supplied trace sinks are now caller-owned by default. Set
   `owns_trace_sinks=True` to drain and close them with the client.
+- Added the public `MarkRef`, `MarkPayload`, `MarkDescriptionRef`, and
+  `MarkDescriptionPayload` contracts, `CaptionRequest.mark_indices`, and the
+  `set_of_mark` transform descriptor. Mark mappings preserve source observation
+  IDs and regions as transform lineage, but are explicitly rejected as answer
+  evidence; a rendered mapping does not prove a label or backend description.
+  A mark-aware caption request instead requires bounded structured index-to-text
+  observations, not free text that happens to contain a number.
+- Added the base-install `penampakan.image.mark_regions` programmatic transform
+  for one to 99 caller-supplied normalized boxes. It provides deterministic
+  spatial numbering, exact/configurable near-duplicate removal, bounded
+  collision placement, alpha preservation, optional sanitized labels, and
+  font-independent vector digits covered by the project's MIT license. Its
+  descriptor records `source="caller_supplied"`, and it creates no observation
+  or `MarkPayload`.
+- Added a gated observation-backed agent workflow: `mark_regions` accepts only
+  visible detection/segmentation observation IDs, emits one transform plus one
+  `MarkPayload`, and `describe_marks` requires structured mark-indexed backend
+  output. The tools remain absent without localized sources and an exact backend
+  advertising `caption.mark_references`. `agent-v2` adds mark-specific evidence
+  guidance only while the tool is exposed; `agent-v1` and the default prompt/tool
+  behavior remain unchanged. No current first-party visual backend advertises the
+  feature, and the real-weight contract and paired SoM-versus-control quality gate
+  remain open.
 
 ## Penampakan 0.5.0
 Released 2026-08-18

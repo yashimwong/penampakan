@@ -159,7 +159,7 @@ def test_policy_constructor_rejects_unsupported_prompt_and_output_limit() -> Non
     llm = ScriptedTextLLM([])
 
     with pytest.raises(ValueError, match="unsupported prompt"):
-        JsonActionPolicy(llm, prompt_version="agent-v2")
+        JsonActionPolicy(llm, prompt_version="agent-v3")
     with pytest.raises(ValueError, match="positive"):
         JsonActionPolicy(llm, max_output_tokens=0)
 

@@ -7,12 +7,14 @@ from typing import Annotated, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
+from penampakan.errors import ToolExecutionError
 from penampakan.models import (
     Box,
     Capability,
     CaptionRequest,
     ColorsRequest,
     DetectionRequest,
+    MarkPayload,
     MetadataRequest,
     OCRRequest,
     Point,
@@ -21,6 +23,7 @@ from penampakan.models import (
 from penampakan.perception.registry import ToolExecutionContext, ToolRegistry, ToolResult
 
 AssetId = Annotated[str, StringConstraints(pattern=r"^img_[0-9a-f]{16,64}$")]
+ObservationId = Annotated[str, StringConstraints(pattern=r"^obs_[0-9]{6,}$")]
 Label = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=100)]
 LanguageTag = Annotated[
     str,
@@ -60,6 +63,13 @@ class CaptionArguments(_Arguments):
         | None
     ) = None
     max_sentences: int = Field(default=3, ge=1, le=8)
+
+
+class DescribeMarksArguments(_Arguments):
+    """Arguments for structured descriptions of a trusted mark mapping."""
+
+    asset_id: AssetId
+    mark_observation_id: ObservationId
 
 
 class OCRArguments(_Arguments):
@@ -114,6 +124,31 @@ async def _caption(context: ToolExecutionContext, arguments: BaseModel) -> ToolR
             region=values.region,
             focus=values.focus,
             max_sentences=values.max_sentences,
+        ),
+    )
+
+
+async def _describe_marks(context: ToolExecutionContext, arguments: BaseModel) -> ToolResult:
+    values = _typed(arguments, DescribeMarksArguments)
+    try:
+        observation = context.observation(values.mark_observation_id)
+    except Exception as error:
+        raise ToolExecutionError(
+            code="mark_mapping_unavailable",
+            tool_name="describe_marks",
+        ) from error
+    payload = observation.payload
+    if (
+        observation.asset_id != values.asset_id
+        or not isinstance(payload, MarkPayload)
+        or payload.derived_asset_id != values.asset_id
+    ):
+        raise ToolExecutionError(code="mark_mapping_invalid", tool_name="describe_marks")
+    return await context.perceive(
+        values.asset_id,
+        CaptionRequest(
+            max_sentences=8,
+            mark_indices=tuple(mark.index for mark in payload.marks),
         ),
     )
 
@@ -208,6 +243,18 @@ def register_vision_tools(registry: ToolRegistry, capabilities: Collection[Capab
         )
 
 
+def register_mark_description_tool(registry: ToolRegistry) -> None:
+    """Register structured mark interpretation after exact-backend gating."""
+
+    registry.register(
+        name="describe_marks",
+        description="Return structured descriptions keyed by visible numeric mark indices.",
+        arguments_model=DescribeMarksArguments,
+        executor=_describe_marks,
+        cost_hint=4,
+    )
+
+
 def _typed(value: BaseModel, expected: type[ArgumentsT]) -> ArgumentsT:
     if not isinstance(value, expected):
         raise TypeError("validated tool arguments have an unexpected type")
@@ -217,9 +264,11 @@ def _typed(value: BaseModel, expected: type[ArgumentsT]) -> ArgumentsT:
 __all__ = [
     "CaptionArguments",
     "ColorsArguments",
+    "DescribeMarksArguments",
     "DetectionArguments",
     "MetadataArguments",
     "OCRArguments",
     "SegmentationArguments",
+    "register_mark_description_tool",
     "register_vision_tools",
 ]

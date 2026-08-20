@@ -23,6 +23,7 @@ from penampakan.errors import (
     OperationTimeoutError,
     PenampakanError,
     SessionClosedError,
+    ToolExecutionError,
     ToolLimitExceededError,
 )
 from penampakan.image.assets import AssetCommit, AssetStore
@@ -37,6 +38,8 @@ from penampakan.models import (
     InspectionPlan,
     InspectionResult,
     JsonValue,
+    MarkPayload,
+    MarkRef,
     MetadataRequest,
     Observation,
     ObservationDraft,
@@ -44,6 +47,7 @@ from penampakan.models import (
     PolicyAction,
     PolicyInput,
     ToolAction,
+    ToolSpec,
     TransformPayload,
     VisionAnswer,
     VisionRequest,
@@ -207,6 +211,7 @@ class AsyncVisionSession:
         self._active_budget: RunBudget | None = None
         self._active_trace: TraceBuilder | None = None
         self._active_tool_name: str | None = None
+        self._active_visible_observation_ids: frozenset[str] = frozenset()
         self._selected_policy_invocation_id: str | None = None
         self._last_perception: _PerceptionOutcome | None = None
         self._previous_answer_observation_ids: tuple[str, ...] = ()
@@ -285,6 +290,13 @@ class AsyncVisionSession:
         """Validate session asset capacity before rendering a transform."""
         self._require_open()
         self._assets.ensure_capacity(parent_id, count)
+
+    def observation(self, observation_id: str) -> Observation:
+        """Resolve only source observations visible to the active policy call."""
+        self._require_open()
+        if observation_id not in self._active_visible_observation_ids:
+            raise ToolExecutionError(code="mark_source_not_visible")
+        return self._observations.get(observation_id)
 
     async def perceive(self, asset_id: str, request: VisionRequest) -> ToolResult:
         """Route one active ask-tool perception request."""
@@ -634,7 +646,7 @@ class AsyncVisionSession:
         policy_input = PolicyInput(
             question=question,
             context=context.text,
-            tools=self._tools.specs,
+            tools=self._policy_tool_specs(context),
             prior_actions=prior_actions,
             remaining=budget.remaining(current_depth=self._maximum_depth()),
             answer_only=answer_only,
@@ -907,6 +919,7 @@ class AsyncVisionSession:
         self._active_budget = budget
         self._active_trace = trace
         self._active_tool_name = action.tool
+        self._active_visible_observation_ids = frozenset(context.visible_observation_ids)
         self._last_perception = None
         try:
             result = await self._tools.execute(self, action.tool, action.arguments)
@@ -915,6 +928,23 @@ class AsyncVisionSession:
                 await budget.refund_reused_assets(reserved_assets)
             await invocation.finish(outcome="cancelled")
             raise
+        except ToolExecutionError as error:
+            if reserved_assets:
+                await budget.refund_reused_assets(reserved_assets)
+            code = error.code if error.code.replace("_", "a").isalnum() else "tool_execution_failed"
+            warning_observation = await self._commit_reasoning_warning(
+                code,
+                "A visual tool rejected an unavailable or invalid source.",
+                trace,
+                parent_observation_ids=parent_observation_ids,
+            )
+            warning_info = WarningInfo(
+                code=code,
+                message="A requested visual tool failed safely.",
+                details={"tool_name": action.tool},
+            )
+            await invocation.finish(outcome="error", error=error)
+            return (warning_observation,), (warning_info,), ()
         except Exception as error:
             if reserved_assets:
                 await budget.refund_reused_assets(reserved_assets)
@@ -940,9 +970,15 @@ class AsyncVisionSession:
             self._active_budget = None
             self._active_trace = None
             self._active_tool_name = None
-        await invocation.finish(outcome="ok", data={"tool_name": action.tool})
+            self._active_visible_observation_ids = frozenset()
         if result.assets:
-            commits = self._assets.commit(asset_id, result.assets)
+            try:
+                commits = self._assets.commit(asset_id, result.assets)
+            except BaseException as error:
+                if reserved_assets:
+                    await budget.refund_reused_assets(reserved_assets)
+                await invocation.finish(outcome="error", error=error)
+                raise
             reused = sum(commit.reused for commit in commits)
             if reused:
                 await budget.refund_reused_assets(reused)
@@ -950,6 +986,8 @@ class AsyncVisionSession:
                 action,
                 commits,
                 parent_observation_ids,
+                mark_mappings=result.mark_mappings,
+                source_observation_ids=result.source_observation_ids,
             )
             for commit in commits:
                 if commit.reused:
@@ -969,10 +1007,12 @@ class AsyncVisionSession:
             )
             observations = (*observations, *warning_observations)
             await self._trace_committed_many(trace, observations)
+            await invocation.finish(outcome="ok", data={"tool_name": action.tool})
             lineage = self._lineage_for_asset(commits[-1].asset.id) if commits else ()
             return observations, result.warnings, lineage
         perception = self._last_perception
         if perception is None:
+            await invocation.finish(outcome="ok", data={"tool_name": action.tool})
             return (), result.warnings, self._lineage_for_asset(asset_id)
         observations = self._observations.commit_result(
             perception.asset_id,
@@ -997,6 +1037,7 @@ class AsyncVisionSession:
         )
         observations = (*observations, *warning_observations)
         await self._trace_committed(trace, perception.asset_id, observations)
+        await invocation.finish(outcome="ok", data={"tool_name": action.tool})
         return observations, result.warnings, self._lineage_for_asset(asset_id)
 
     def _commit_transform_observations(
@@ -1004,8 +1045,14 @@ class AsyncVisionSession:
         action: ToolAction,
         commits: tuple[AssetCommit, ...],
         parent_observation_ids: tuple[str, ...],
+        *,
+        mark_mappings: tuple[tuple[MarkRef, ...], ...] = (),
+        source_observation_ids: tuple[str, ...] = (),
     ) -> tuple[Observation, ...]:
+        if mark_mappings and len(mark_mappings) != len(commits):
+            raise ValueError("mark mappings must contain one entry per committed asset")
         observations: list[Observation] = []
+        all_parent_ids = tuple(dict.fromkeys((*parent_observation_ids, *source_observation_ids)))
         provenance = ProvenanceSpec(
             tool=action.tool,
             capability=None,
@@ -1013,20 +1060,32 @@ class AsyncVisionSession:
             backend_version="1",
             request_hash=self._canonical_tool_call(action),
             duration_ms=0,
-            parent_observation_ids=parent_observation_ids,
+            parent_observation_ids=all_parent_ids,
         )
-        for commit in commits:
-            draft = ObservationDraft(
-                payload=TransformPayload(
-                    derived_asset_id=commit.asset.id,
-                    parent_asset_id=commit.parent_id,
-                    transform=commit.transform,
+        for index, commit in enumerate(commits):
+            drafts = [
+                ObservationDraft(
+                    payload=TransformPayload(
+                        derived_asset_id=commit.asset.id,
+                        parent_asset_id=commit.parent_id,
+                        transform=commit.transform,
+                    )
                 )
-            )
+            ]
+            if mark_mappings:
+                drafts.append(
+                    ObservationDraft(
+                        payload=MarkPayload(
+                            derived_asset_id=commit.asset.id,
+                            parent_asset_id=commit.parent_id,
+                            marks=mark_mappings[index],
+                        )
+                    )
+                )
             observations.extend(
                 self._observations.commit_drafts(
                     commit.asset.id,
-                    (draft,),
+                    tuple(drafts),
                     provenance,
                 )
             )
@@ -1098,9 +1157,31 @@ class AsyncVisionSession:
             "enhance_contrast",
             "to_grayscale",
             "add_coordinate_grid",
+            "mark_regions",
         }:
             return 1
         return 0
+
+    def _policy_tool_specs(self, context: CompiledContext) -> tuple[ToolSpec, ...]:
+        """Expose marking only when localized source observations are visible."""
+        visible = frozenset(context.visible_observation_ids)
+        mark_prompt_enabled = getattr(self._policy, "prompt_version", None) != "agent-v1"
+        has_mark_source = any(
+            observation.id in visible
+            and observation.region is not None
+            and observation.payload.type in {"detection", "segmentation"}
+            for observation in self._observations.snapshots()
+        )
+        has_mark_mapping = any(
+            observation.id in visible and isinstance(observation.payload, MarkPayload)
+            for observation in self._observations.snapshots()
+        )
+        return tuple(
+            spec
+            for spec in self._tools.specs
+            if (spec.name != "mark_regions" or (mark_prompt_enabled and has_mark_source))
+            and (spec.name != "describe_marks" or (mark_prompt_enabled and has_mark_mapping))
+        )
 
     @staticmethod
     def _canonical_tool_call(action: ToolAction) -> str:

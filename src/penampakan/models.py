@@ -224,6 +224,7 @@ class TransformDescriptor(_FrozenModel):
         "enhance_contrast",
         "grayscale",
         "coordinate_grid",
+        "set_of_mark",
     ]
     parameters: dict[str, JsonValue]
 
@@ -348,6 +349,16 @@ class CaptionRequest(_FrozenModel):
         | None
     ) = None
     max_sentences: Annotated[int, Field(ge=1, le=8)] = 3
+    mark_indices: Annotated[tuple[int, ...], Field(max_length=99)] = Field(default_factory=tuple)
+
+    @field_validator("mark_indices")
+    @classmethod
+    def _validate_mark_indices(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        if any(isinstance(index, bool) or not 1 <= index <= 99 for index in value):
+            raise ValueError("mark indices must be integers between 1 and 99")
+        if len(value) != len(set(value)):
+            raise ValueError("mark indices must be unique")
+        return value
 
 
 class OCRRequest(_FrozenModel):
@@ -464,6 +475,37 @@ class CaptionPayload(_FrozenModel):
     ) = None
 
 
+class MarkDescriptionRef(_FrozenModel):
+    """One structured description returned for a visible numeric mark."""
+
+    index: Annotated[int, Field(ge=1, le=99)]
+    description: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=1_000),
+        AfterValidator(_reject_nul),
+    ]
+
+
+class MarkDescriptionPayload(_FrozenModel):
+    """Bounded structured descriptions from a proven mark-aware backend."""
+
+    type: Literal["mark_description"] = "mark_description"
+    references: Annotated[
+        tuple[MarkDescriptionRef, ...],
+        Field(min_length=1, max_length=99),
+    ]
+
+    @field_validator("references")
+    @classmethod
+    def _unique_reference_indices(
+        cls, value: tuple[MarkDescriptionRef, ...]
+    ) -> tuple[MarkDescriptionRef, ...]:
+        indices = tuple(reference.index for reference in value)
+        if len(indices) != len(set(indices)):
+            raise ValueError("mark description indices must be unique")
+        return value
+
+
 class TextPayload(_FrozenModel):
     """A bounded OCR text block with optional language information."""
 
@@ -509,6 +551,37 @@ class TransformPayload(_FrozenModel):
     transform: TransformDescriptor
 
 
+class MarkRef(_FrozenModel):
+    """One deterministic numeric reference to a source observation region."""
+
+    index: Annotated[int, Field(ge=1, le=99)]
+    observation_id: _ObservationId
+    region: Box
+    source_label: _Label | None = None
+
+
+class MarkPayload(_FrozenModel):
+    """A transform-fact mapping from rendered indices to source observations."""
+
+    type: Literal["mark"] = "mark"
+    derived_asset_id: _AssetId
+    parent_asset_id: _AssetId
+    marks: Annotated[tuple[MarkRef, ...], Field(min_length=1, max_length=99)]
+
+    @field_validator("marks")
+    @classmethod
+    def _validate_marks(cls, value: tuple[MarkRef, ...]) -> tuple[MarkRef, ...]:
+        indices = tuple(mark.index for mark in value)
+        observation_ids = tuple(mark.observation_id for mark in value)
+        if len(indices) != len(set(indices)):
+            raise ValueError("mark indices must be unique")
+        if len(observation_ids) != len(set(observation_ids)):
+            raise ValueError("mark observation IDs must be unique")
+        if indices != tuple(range(1, len(value) + 1)):
+            raise ValueError("mark indices must be contiguous and start at one")
+        return value
+
+
 class WarningPayload(_FrozenModel):
     """A stable warning represented as an observation payload."""
 
@@ -521,10 +594,12 @@ ObservationPayload: TypeAlias = Annotated[
     MetadataPayload
     | ColorsPayload
     | CaptionPayload
+    | MarkDescriptionPayload
     | TextPayload
     | DetectionPayload
     | SegmentationPayload
     | TransformPayload
+    | MarkPayload
     | WarningPayload,
     Field(discriminator="type"),
 ]
@@ -576,10 +651,10 @@ class Observation(_FrozenModel):
     @model_validator(mode="after")
     def _validate_region_semantics(self) -> Observation:
         if (
-            isinstance(self.payload, (MetadataPayload, TransformPayload))
+            isinstance(self.payload, (MetadataPayload, TransformPayload, MarkPayload))
             and self.region is not None
         ):
-            raise ValueError("metadata and transform observations cannot have a region")
+            raise ValueError("metadata, transform, and mark observations cannot have a region")
         return self
 
 
@@ -594,10 +669,10 @@ class ObservationDraft(_FrozenModel):
     @model_validator(mode="after")
     def _validate_region_semantics(self) -> ObservationDraft:
         if (
-            isinstance(self.payload, (MetadataPayload, TransformPayload))
+            isinstance(self.payload, (MetadataPayload, TransformPayload, MarkPayload))
             and self.region is not None
         ):
-            raise ValueError("metadata and transform drafts cannot have a region")
+            raise ValueError("metadata, transform, and mark drafts cannot have a region")
         return self
 
 
@@ -1010,6 +1085,10 @@ __all__ = [
     "JsonValue",
     "LLMRequest",
     "LLMResponse",
+    "MarkDescriptionPayload",
+    "MarkDescriptionRef",
+    "MarkPayload",
+    "MarkRef",
     "Message",
     "MessageRole",
     "MetadataPayload",

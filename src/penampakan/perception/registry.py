@@ -15,6 +15,8 @@ from penampakan.errors import ConfigurationError, ToolExecutionError
 from penampakan.image.assets import PendingAsset
 from penampakan.models import (
     JsonValue,
+    MarkRef,
+    Observation,
     ObservationDraft,
     ToolSpec,
     VisionRequest,
@@ -31,6 +33,8 @@ class ToolResult:
     observations: tuple[ObservationDraft, ...] = field(default_factory=tuple)
     assets: tuple[PendingAsset, ...] = field(default_factory=tuple)
     warnings: tuple[WarningInfo, ...] = field(default_factory=tuple)
+    mark_mappings: tuple[tuple[MarkRef, ...], ...] = field(default_factory=tuple)
+    source_observation_ids: tuple[str, ...] = field(default_factory=tuple)
 
 
 class ToolExecutionContext(Protocol):
@@ -42,6 +46,10 @@ class ToolExecutionContext(Protocol):
 
     def ensure_asset_capacity(self, parent_id: str, count: int) -> None:
         """Reserve worst-case asset capacity before transform rendering."""
+        ...
+
+    def observation(self, observation_id: str) -> Observation:
+        """Return one policy-visible source observation."""
         ...
 
     async def perceive(self, asset_id: str, request: VisionRequest) -> ToolResult:

@@ -102,7 +102,7 @@ logging or telemetry.
 | Action policy | `penampakan.reasoning.policy` | Base | None; validates `prompt_version` against `supported_prompt_versions()` | Caller-owned unless `owns_policy=True`; closes its LLM only with `owns_llm=True` |
 | Prompt-version discovery | `penampakan.reasoning` | Base | None; pure functions and constants | Not applicable |
 | Metrics | `penampakan.evaluation` | Base | None; experimental pure diagnostics | Not applicable |
-| Image loading and geometry | `penampakan.image` | Base | None; pure functions over caller data | Returned assets are plain values |
+| Image loading, geometry, and Set-of-Mark rendering | `penampakan.image` | Base | None; pure functions over caller data; `mark_regions` uses built-in vector digits and no font asset | Returned assets are plain values; callers close the pending marked asset |
 | Trace building and redaction | `penampakan.tracing` | Base | None; a builder holds only run-local state | Owned by the run that created it; caller-supplied `TraceSink`s stay caller-owned |
 | In-memory and JSONL trace sinks | `penampakan.trace_sinks` | Base | JSONL starts its writer lazily on first emit | Caller-owned unless `owns_trace_sinks=True`; close drains accepted JSONL events |
 | OpenTelemetry trace sink | `penampakan.trace_sinks` | `opentelemetry` | Validates the injected provider; never changes global OTel state | Caller-owned unless `owns_trace_sinks=True` |
@@ -123,3 +123,29 @@ is not a warning, and descends from the active root asset. Evidence snapshots
 carry their supporting claim and full provenance. These are structural checks;
 they do not establish that an observation entails a claim or that the backend's
 observation matches visual truth.
+
+`MarkRef` and `MarkPayload` are top-level public contracts. A `MarkRef` contains a
+contiguous one-based index, the original observation ID, its normalized `Box`,
+and an optional source label. A `MarkPayload` spans the derived asset, contains
+one to 99 unique references, and deliberately has no `Observation.region` of its
+own. It is a machine-readable transform mapping, not perception evidence, and
+core evidence validation rejects it just as it rejects a `TransformPayload`.
+
+`CaptionRequest.mark_indices` selects up to 99 unique rendered indices for a
+backend whose caption capability advertises `caption.mark_references`. Such a
+request must return one structured `MarkDescriptionPayload`, containing unique
+`MarkDescriptionRef(index, description)` values, rather than an ordinary caption
+or free text that merely mentions a number. Mark descriptions are untrusted
+backend observations; unlike the transform-only `MarkPayload`, they can be cited
+alongside the original localized observations when they actually support a
+claim.
+
+`penampakan.image.mark_regions(image, regions, ...)` is the separate
+programmatic raw-box API. It returns a pending `set_of_mark` asset whose
+descriptor identifies `source="caller_supplied"`; it does not manufacture
+observation IDs or a `MarkPayload`. Region order cannot be used to select badge
+indices: normalized boxes are sorted spatially, exact and configurable
+near-duplicates are removed, and indices are assigned after deterministic
+placement. `include_labels=False` is the default. This function is available
+without an LLM or optional model package, and the returned pending asset owns its
+rendered Pillow image until the caller closes it.

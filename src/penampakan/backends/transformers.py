@@ -514,7 +514,11 @@ class TransformersCaptionBackend(_TransformersBackend):
 
     def supports(self, request: VisionRequest) -> bool:
         """Return whether this backend supports the complete caption request."""
-        return isinstance(request, CaptionRequest) and request.focus is None
+        return (
+            isinstance(request, CaptionRequest)
+            and request.focus is None
+            and not request.mark_indices
+        )
 
     async def analyze(self, image: BackendImage, request: VisionRequest) -> VisionResult:
         """Generate the first non-empty bounded caption for an image or crop."""

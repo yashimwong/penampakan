@@ -29,12 +29,29 @@ store owns the canonical root pixels. Safe transforms create immutable derived
 assets with a parent ID, derivation depth, transform descriptor, and content
 digest. Identical derived content is reused rather than installed twice.
 
+The programmatic Set-of-Mark transform is intentionally pixels-only. For raw
+normalized boxes supplied through `penampakan.image.mark_regions`, the resulting
+`set_of_mark` descriptor records `source="caller_supplied"`. The boxes do not
+enter the observation store and cannot acquire backend provenance merely by being
+rendered. The renderer orders and deduplicates regions deterministically, drops
+badges that cannot be placed legibly and records the count, preserves alpha, and
+uses built-in vector digit glyphs covered by Penampakan's MIT license rather than
+a runtime font dependency. Optional labels are off by default and sanitized when
+explicitly enabled.
+
 Backends receive a `BackendImage` containing an immutable asset descriptor and
 private canonical bytes. Their untrusted drafts are normalized, then committed
 atomically to an append-only observation store. Core code assigns observation
 IDs and provenance: tool and capability, backend and model identity, request
 hash, parent observations, cache-hit state, and duration. Public results are
 immutable snapshots; closing a session releases its private pixels and stores.
+
+An observation-linked marking workflow additionally records a `MarkPayload` that
+maps each numeric `MarkRef` to its original localized observation. The mapping is
+lineage metadata on the derived asset: the `MarkPayload` itself has no
+`Observation.region` and is not admissible answer evidence. A mark-aware
+backend's bounded description remains untrusted perception and must be supported
+by the original detection or segmentation when cited.
 
 ## Resource ownership
 

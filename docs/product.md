@@ -20,6 +20,7 @@ accuracy.
 | OCR | Optional Tesseract backend | Requires the `ocr` extra and a system Tesseract executable. |
 | Captioning and open-vocabulary detection | Optional Transformers backends | Require the `transformers` extra and explicit model revisions for reproducible durable caching. |
 | Segmentation | Public request/result contract only | No first-party segmentation backend is shipped. |
+| Set-of-Mark rendering | `penampakan.image.mark_regions` | Deterministic programmatic transform only; no first-party backend currently satisfies the mark-reference contract, so it is not an agent tool. |
 | Text-model answering | Callable, OpenAI, Anthropic, and LiteLLM adapters | Provider adapters use separately installed extras. |
 
 Inputs are single, static PNG, JPEG, or WebP images supplied as local paths,
@@ -35,6 +36,7 @@ Penampakan does not:
 - execute Python, shell, or another program emitted by a language model;
 - make an unsupported perception cue appear through prompting alone;
 - treat a caption backend as an OCR, depth, or geometry specialist;
+- assume a generic captioner can interpret Set-of-Mark digits;
 - prove that an answer is true merely because its evidence IDs are valid;
 - download remote image URLs on the caller's behalf; or
 - enable durable content retention by default.
@@ -78,3 +80,18 @@ input image's lineage. This validation does not prove claim entailment or visual
 truth. Penampakan has not independently evaluated evidence entailment unless a
 specific published benchmark artifact explicitly says otherwise.
 
+Set-of-Mark has the same evidence boundary. `MarkPayload` maps rendered indices
+to source observations and their normalized regions; it records a transform fact,
+not proof that a source label or a later visual description is true. Mark and
+transform observations therefore cannot be cited as answer evidence. Raw boxes
+passed to `penampakan.image.mark_regions` are recorded as `caller_supplied` on the
+derived asset and do not produce a `MarkPayload` at all.
+
+The original Set-of-Mark mechanism gives a marked image directly to a capable
+multimodal model. A text-only policy receiving output from an ordinary captioner
+is a different mechanism, and Penampakan does not assume that captioning backends
+read badge numbers. No shipped first-party backend currently advertises a tested
+mark-reference capability. The agent tool and mark-specific prompt guidance stay
+absent unless localized observations are available and an exact backend revision
+passes the structured mark-reference integration contract. The paired answer-
+quality experiment and default-prompt decision have not been completed.

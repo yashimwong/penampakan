@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import math
+import re
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Literal, cast
 
-from PIL import ImageDraw, ImageEnhance
+from PIL import ImageDraw, ImageEnhance, ImageFont
 from PIL.Image import Image as PillowImage
 from PIL.Image import Transpose
 
 from penampakan.image.assets import PendingAsset
 from penampakan.image.geometry import PixelBox, build_crop_geometry, pixels_to_box
-from penampakan.models import Box, JsonValue, TransformDescriptor
+from penampakan.models import Box, JsonValue, MarkRef, TransformDescriptor, WarningInfo
 
 
 def _finite_number(value: float, name: str) -> float:
@@ -65,10 +68,357 @@ def _descriptor(
         "enhance_contrast",
         "grayscale",
         "coordinate_grid",
+        "set_of_mark",
     ],
     parameters: dict[str, JsonValue],
 ) -> TransformDescriptor:
     return TransformDescriptor(name=name, parameters=parameters)
+
+
+@dataclass(frozen=True, slots=True)
+class _MarkCandidate:
+    region: Box
+    observation_id: str | None = None
+    source_label: str | None = None
+    priority: float = 0.0
+
+
+@dataclass(frozen=True, slots=True)
+class _MarkRenderResult:
+    pending: PendingAsset
+    marks: tuple[MarkRef, ...]
+    warnings: tuple[WarningInfo, ...]
+
+
+_DIGITS: dict[str, tuple[str, ...]] = {
+    "0": ("111", "101", "101", "101", "111"),
+    "1": ("010", "110", "010", "010", "111"),
+    "2": ("111", "001", "111", "100", "111"),
+    "3": ("111", "001", "111", "001", "111"),
+    "4": ("101", "101", "111", "001", "001"),
+    "5": ("111", "100", "111", "001", "111"),
+    "6": ("111", "100", "111", "101", "111"),
+    "7": ("111", "001", "001", "001", "001"),
+    "8": ("111", "101", "111", "101", "111"),
+    "9": ("111", "101", "111", "001", "111"),
+}
+_LABEL_WHITESPACE = re.compile(r"\s+")
+
+
+def _sanitize_mark_label(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("mark labels must be strings or None")
+    safe = "".join(character if ord(character) >= 32 else " " for character in value)
+    safe = _LABEL_WHITESPACE.sub(" ", safe).strip()
+    return safe[:24] or None
+
+
+def _mark_sort_key(candidate: _MarkCandidate) -> tuple[float, float, float, float, str]:
+    region = candidate.region
+    return (
+        region.y_min,
+        region.x_min,
+        region.y_max,
+        region.x_max,
+        candidate.observation_id or "",
+    )
+
+
+def _normalize_mark_candidates(
+    candidates: Sequence[_MarkCandidate],
+    near_duplicate_iou: float | None,
+) -> tuple[tuple[_MarkCandidate, ...], int]:
+    selected = tuple(candidates)
+    if not 1 <= len(selected) <= 99:
+        raise ValueError("mark regions must contain between 1 and 99 items")
+    if near_duplicate_iou is None:
+        threshold = None
+    else:
+        threshold = _bounded_number(
+            near_duplicate_iou,
+            "near_duplicate_iou",
+            0.0,
+            1.0,
+        )
+    by_id: dict[str, _MarkCandidate] = {}
+    idless: list[_MarkCandidate] = []
+    for candidate in selected:
+        if not isinstance(candidate, _MarkCandidate):
+            raise TypeError("mark candidates must be resolved mark values")
+        if not math.isfinite(candidate.priority):
+            raise ValueError("mark priority must be finite")
+        if candidate.observation_id is None:
+            idless.append(candidate)
+            continue
+        previous = by_id.get(candidate.observation_id)
+        if previous is not None and previous != candidate:
+            raise ValueError("duplicate observation IDs must resolve to the same mark")
+        by_id[candidate.observation_id] = candidate
+    ordered = sorted((*by_id.values(), *idless), key=_mark_sort_key)
+    retained: list[_MarkCandidate] = []
+    dropped = len(selected) - len(ordered)
+    for candidate in ordered:
+        if threshold is not None and any(
+            candidate.region.iou(existing.region) >= threshold for existing in retained
+        ):
+            dropped += 1
+            continue
+        retained.append(candidate)
+    if not retained:
+        raise ValueError("mark deduplication removed every region")
+    return tuple(retained), dropped
+
+
+def _pixel_region(box: Box, width: int, height: int) -> tuple[int, int, int, int]:
+    left = min(width - 1, max(0, math.floor(box.x_min * width)))
+    top = min(height - 1, max(0, math.floor(box.y_min * height)))
+    right = min(width - 1, max(left, math.ceil(box.x_max * width) - 1))
+    bottom = min(height - 1, max(top, math.ceil(box.y_max * height) - 1))
+    return left, top, right, bottom
+
+
+def _badge_size(index: int, width: int, height: int) -> tuple[int, int, int]:
+    target_height = max(9, min(32, round(min(width, height) * 0.075)))
+    target_height = min(target_height, height)
+    unit = max(1, (target_height - 4) // 5)
+    digits = len(str(index))
+    badge_width = 4 + digits * 3 * unit + (digits - 1) * unit
+    badge_height = 4 + 5 * unit
+    while (badge_width > width or badge_height > height) and unit > 1:
+        unit -= 1
+        badge_width = 4 + digits * 3 * unit + (digits - 1) * unit
+        badge_height = 4 + 5 * unit
+    return min(width, badge_width), min(height, badge_height), unit
+
+
+def _intersects(first: tuple[int, int, int, int], second: tuple[int, int, int, int]) -> bool:
+    return not (
+        first[2] < second[0] or second[2] < first[0] or first[3] < second[1] or second[3] < first[1]
+    )
+
+
+def _badge_candidates(
+    region: tuple[int, int, int, int],
+    badge_width: int,
+    badge_height: int,
+    image_width: int,
+    image_height: int,
+) -> tuple[tuple[int, int, int, int], ...]:
+    left, top, right, bottom = region
+    positions = (
+        (left, top),
+        (right - badge_width + 1, top),
+        (left, top - badge_height),
+        (left, bottom + 1),
+        (right - badge_width + 1, top - badge_height),
+        (right - badge_width + 1, bottom + 1),
+        ((left + right - badge_width + 1) // 2, (top + bottom - badge_height + 1) // 2),
+    )
+    bounded: list[tuple[int, int, int, int]] = []
+    for x, y in positions:
+        x = min(image_width - badge_width, max(0, x))
+        y = min(image_height - badge_height, max(0, y))
+        box = (x, y, x + badge_width - 1, y + badge_height - 1)
+        if box not in bounded:
+            bounded.append(box)
+    return tuple(bounded)
+
+
+def _draw_vector_index(
+    draw: ImageDraw.ImageDraw,
+    index: int,
+    badge: tuple[int, int, int, int],
+    unit: int,
+    fill: tuple[int, int, int],
+) -> None:
+    x = badge[0] + 2
+    y = badge[1] + 2
+    for digit in str(index):
+        for row, pattern in enumerate(_DIGITS[digit]):
+            for column, enabled in enumerate(pattern):
+                if enabled == "1":
+                    draw.rectangle(
+                        (
+                            x + column * unit,
+                            y + row * unit,
+                            x + (column + 1) * unit - 1,
+                            y + (row + 1) * unit - 1,
+                        ),
+                        fill=fill,
+                    )
+        x += 4 * unit
+
+
+def _render_mark_candidates(
+    image: PillowImage,
+    candidates: Sequence[_MarkCandidate],
+    *,
+    include_labels: bool,
+    near_duplicate_iou: float | None,
+    source: Literal["caller_supplied", "observation"],
+) -> _MarkRenderResult:
+    source_image = _normalized_image(image)
+    if not isinstance(include_labels, bool):
+        raise TypeError("include_labels must be a boolean")
+    normalized, deduplicated = _normalize_mark_candidates(candidates, near_duplicate_iou)
+    alpha = source_image.getchannel("A") if source_image.mode == "RGBA" else None
+    result = source_image.convert("RGB") if source_image.mode == "RGBA" else source_image.copy()
+    draw = ImageDraw.Draw(result)
+    occupied: list[tuple[int, int, int, int]] = []
+    placements: dict[_MarkCandidate, tuple[int, int, int, int]] = {}
+    # Higher-priority observations claim scarce badge space first; all ties are
+    # resolved by the canonical spatial key, never by caller ordering.
+    for provisional_index, candidate in sorted(
+        enumerate(normalized, start=1),
+        key=lambda item: (-item[1].priority, _mark_sort_key(item[1])),
+    ):
+        badge_width, badge_height, _ = _badge_size(
+            provisional_index,
+            source_image.width,
+            source_image.height,
+        )
+        region = _pixel_region(candidate.region, source_image.width, source_image.height)
+        placement = next(
+            (
+                box
+                for box in _badge_candidates(
+                    region,
+                    badge_width,
+                    badge_height,
+                    source_image.width,
+                    source_image.height,
+                )
+                if not any(_intersects(box, existing) for existing in occupied)
+            ),
+            None,
+        )
+        if placement is not None:
+            placements[candidate] = placement
+            occupied.append(placement)
+    retained = tuple(candidate for candidate in normalized if candidate in placements)
+    warnings: list[WarningInfo] = []
+    if deduplicated:
+        warnings.append(
+            WarningInfo(
+                code="duplicate_marks_removed",
+                message="Duplicate or near-duplicate mark regions were removed.",
+                details={"count": deduplicated},
+            )
+        )
+    crowded = len(normalized) - len(retained)
+    if crowded:
+        warnings.append(
+            WarningInfo(
+                code="mark_crowding",
+                message="Crowded marks without a legible badge placement were dropped.",
+                details={"count": crowded},
+            )
+        )
+    if not retained:
+        result.close()
+        if alpha is not None:
+            alpha.close()
+        raise ValueError("no mark badge can be placed legibly")
+    refs: list[MarkRef] = []
+    for index, candidate in enumerate(retained, start=1):
+        region = _pixel_region(candidate.region, source_image.width, source_image.height)
+        badge = placements[candidate]
+        foreground, outline = _local_colors(result, badge[0], badge[1])
+        line_width = max(1, min(3, round(min(source_image.size) * 0.006)))
+        draw.rectangle(region, outline=outline, width=min(3, line_width + 2))
+        draw.rectangle(region, outline=foreground, width=line_width)
+        draw.rounded_rectangle(badge, radius=max(1, line_width), fill=foreground, outline=outline)
+        _, _, unit = _badge_size(index, source_image.width, source_image.height)
+        _draw_vector_index(draw, index, badge, unit, outline)
+        label = _sanitize_mark_label(candidate.source_label) if include_labels else None
+        if label:
+            label_y = min(source_image.height - 1, badge[3] + 1)
+            draw.text(
+                (badge[0], label_y),
+                label,
+                font=ImageFont.load_default(),
+                fill=foreground,
+                stroke_width=1,
+                stroke_fill=outline,
+            )
+        if candidate.observation_id is not None:
+            refs.append(
+                MarkRef(
+                    index=index,
+                    observation_id=candidate.observation_id,
+                    region=candidate.region,
+                    source_label=candidate.source_label,
+                )
+            )
+    if alpha is not None:
+        try:
+            result.putalpha(alpha)
+        finally:
+            alpha.close()
+    result.info.clear()
+    descriptor = _descriptor(
+        "set_of_mark",
+        {
+            "include_labels": include_labels,
+            "near_duplicate_iou": near_duplicate_iou,
+            "source": source,
+            "mark_count": len(retained),
+            "dropped_count": deduplicated + crowded,
+        },
+    )
+    return _MarkRenderResult(
+        pending=PendingAsset(image=result, transform=descriptor),
+        marks=tuple(refs),
+        warnings=tuple(warnings),
+    )
+
+
+def mark_regions(
+    image: PillowImage,
+    regions: Sequence[Box],
+    *,
+    labels: Sequence[str | None] | None = None,
+    include_labels: bool = False,
+    near_duplicate_iou: float | None = 0.98,
+) -> PendingAsset:
+    """Render deterministic caller-supplied regions without creating evidence.
+
+    Raw boxes are explicitly recorded as ``caller_supplied`` transform input.
+    They are pixels-only annotations and cannot produce a :class:`MarkPayload`.
+    """
+
+    selected_regions = tuple(regions)
+    selected_labels = tuple(labels) if labels is not None else (None,) * len(selected_regions)
+    if len(selected_labels) != len(selected_regions):
+        raise ValueError("labels must contain exactly one value per region")
+    candidates = tuple(
+        _MarkCandidate(region=region, source_label=_sanitize_mark_label(label))
+        for region, label in zip(selected_regions, selected_labels, strict=True)
+    )
+    return _render_mark_candidates(
+        image,
+        candidates,
+        include_labels=include_labels,
+        near_duplicate_iou=near_duplicate_iou,
+        source="caller_supplied",
+    ).pending
+
+
+def _mark_observation_regions(
+    image: PillowImage,
+    candidates: Sequence[_MarkCandidate],
+    *,
+    near_duplicate_iou: float | None = 0.98,
+) -> _MarkRenderResult:
+    return _render_mark_candidates(
+        image,
+        candidates,
+        include_labels=False,
+        near_duplicate_iou=near_duplicate_iou,
+        source="observation",
+    )
 
 
 def crop(
@@ -301,6 +651,7 @@ __all__ = [
     "crop",
     "enhance_contrast",
     "grayscale",
+    "mark_regions",
     "rotate",
     "tile",
     "to_grayscale",

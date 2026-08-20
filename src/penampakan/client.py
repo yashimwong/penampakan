@@ -38,8 +38,8 @@ from penampakan.protocols import ActionPolicy, Cache, TextLLM, TraceSink, Vision
 from penampakan.reasoning.policy import JsonActionPolicy
 from penampakan.reasoning.prompts import SUPPORTED_PROMPT_VERSIONS
 from penampakan.session import AsyncVisionSession, SharedPerception
-from penampakan.tools.builtin import register_transform_tools
-from penampakan.tools.vision import register_vision_tools
+from penampakan.tools.builtin import register_mark_tool, register_transform_tools
+from penampakan.tools.vision import register_mark_description_tool, register_vision_tools
 
 
 @dataclass(slots=True)
@@ -572,6 +572,19 @@ class AsyncPenampakan:
         registry = ToolRegistry()
         register_vision_tools(registry, capabilities)
         register_transform_tools(registry)
+        has_region_source = bool({Capability.DETECT, Capability.SEGMENT}.intersection(capabilities))
+        has_proven_mark_backend = any(
+            descriptor.durable_cache_eligible
+            and any(
+                capability.capability is Capability.CAPTION
+                and "caption.mark_references" in capability.features
+                for capability in descriptor.capabilities
+            )
+            for descriptor in router.descriptors
+        )
+        if has_region_source and has_proven_mark_backend:
+            register_mark_tool(registry)
+            register_mark_description_tool(registry)
         return registry
 
     @staticmethod

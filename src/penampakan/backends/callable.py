@@ -66,8 +66,11 @@ class CallableVisionBackend:
         features = capabilities.get(request.capability)
         if features is None:
             return False
-        if isinstance(request, CaptionRequest) and request.focus is not None:
-            return "caption.focus" in features
+        if isinstance(request, CaptionRequest):
+            if request.mark_indices and "caption.mark_references" not in features:
+                return False
+            if request.focus is not None and "caption.focus" not in features:
+                return False
         if isinstance(request, OCRRequest) and request.languages:
             return "ocr.languages" in features
         if isinstance(request, DetectionRequest) and request.labels:

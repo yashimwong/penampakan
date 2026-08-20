@@ -299,7 +299,7 @@ def test_canonical_request_json_is_compact_sorted_and_unicode_preserving() -> No
     request = CaptionRequest(region=None, focus="jumlah RՄ", max_sentences=5)
 
     assert canonical_request_json(request) == (
-        '{"capability":"caption","focus":"jumlah RՄ","max_sentences":5}'.encode()
+        '{"capability":"caption","focus":"jumlah RՄ","mark_indices":[],"max_sentences":5}'.encode()
     )
 
 

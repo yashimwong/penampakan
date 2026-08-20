@@ -87,6 +87,7 @@ class JsonActionPolicy:
         """Request and parse one action, enforcing single-repair termination."""
         request = build_policy_request(
             input,
+            prompt_version=self._prompt_version,
             timeout_s=self._timeout_s,
             max_output_tokens=self._max_output_tokens,
             temperature=self._temperature,

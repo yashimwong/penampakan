@@ -12,6 +12,8 @@ from ..models import (
     CaptionPayload,
     ColorsPayload,
     DetectionPayload,
+    MarkDescriptionPayload,
+    MarkPayload,
     MetadataPayload,
     Observation,
     SegmentationPayload,
@@ -31,6 +33,8 @@ _KIND_WEIGHTS = {
     "caption": 30,
     "detection": 25,
     "segmentation": 25,
+    "mark": 15,
+    "mark_description": 30,
     "transform": 15,
     "metadata": 10,
     "colors": 5,
@@ -337,6 +341,12 @@ def _payload_text(observation: Observation) -> tuple[str, ...]:
     elif isinstance(payload, TransformPayload):
         values.append(payload.transform.name)
         values.extend(_json_strings(payload.transform.parameters))
+    elif isinstance(payload, MarkPayload):
+        values.extend(str(mark.index) for mark in payload.marks)
+        values.extend(mark.observation_id for mark in payload.marks)
+    elif isinstance(payload, MarkDescriptionPayload):
+        for reference in payload.references:
+            values.extend((str(reference.index), reference.description))
     elif isinstance(payload, WarningPayload):
         values.extend((payload.code, payload.message))
     for warning in observation.warnings:

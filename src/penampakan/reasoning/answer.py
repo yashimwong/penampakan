@@ -10,6 +10,8 @@ from penampakan.models import (
     AnswerAction,
     AnswerStatus,
     Evidence,
+    MarkDescriptionPayload,
+    MarkPayload,
     Observation,
     RunTrace,
     VisionAnswer,
@@ -74,7 +76,7 @@ def validate_evidence(
         observation = indexed.get(reference.observation_id)
         if observation is None or reference.observation_id not in visible:
             raise EvidenceValidationError()
-        if isinstance(observation.payload, WarningPayload):
+        if isinstance(observation.payload, (MarkPayload, WarningPayload)):
             raise EvidenceValidationError()
         if _contains_action_json(reference.supports):
             raise EvidenceValidationError()
@@ -82,6 +84,22 @@ def validate_evidence(
         if observation_root != root_asset_id:
             raise EvidenceValidationError()
         evidence.append(Evidence(observation=observation, supports=reference.supports))
+    cited_ids = {item.observation.id for item in evidence}
+    for item in evidence:
+        if not isinstance(item.observation.payload, MarkDescriptionPayload):
+            continue
+        mappings = (
+            indexed.get(parent_id)
+            for parent_id in item.observation.provenance.parent_observation_ids
+        )
+        source_ids = {
+            mark.observation_id
+            for mapping in mappings
+            if mapping is not None and isinstance(mapping.payload, MarkPayload)
+            for mark in mapping.payload.marks
+        }
+        if not source_ids or cited_ids.isdisjoint(source_ids):
+            raise EvidenceValidationError()
     if (
         action.status == "answered"
         and not evidence

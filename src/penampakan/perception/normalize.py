@@ -19,6 +19,7 @@ from penampakan.models import (
     ColorsRequest,
     DetectionPayload,
     DetectionRequest,
+    MarkDescriptionPayload,
     MetadataPayload,
     MetadataRequest,
     ObservationDraft,
@@ -213,6 +214,8 @@ def _compatible_payload(request: VisionRequest, draft: ObservationDraft) -> bool
     if isinstance(request, ColorsRequest):
         return isinstance(payload, ColorsPayload)
     if isinstance(request, CaptionRequest):
+        if request.mark_indices:
+            return isinstance(payload, MarkDescriptionPayload)
         return isinstance(payload, CaptionPayload)
     if isinstance(request, OCRRequest):
         return isinstance(payload, TextPayload)
@@ -267,6 +270,13 @@ def _enforce_limits(
                 and len(draft.payload.swatches) > request.count
             ):
                 raise ValueError("backend response exceeds the requested color count")
+    if isinstance(request, CaptionRequest) and request.mark_indices:
+        requested = frozenset(request.mark_indices)
+        for draft in result.observations:
+            if isinstance(draft.payload, MarkDescriptionPayload) and any(
+                reference.index not in requested for reference in draft.payload.references
+            ):
+                raise ValueError("backend returned an unrequested mark index")
     for index, draft in enumerate(result.observations):
         if isinstance(draft.payload, TextPayload):
             change = changes.get(index, _TextChange())

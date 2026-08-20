@@ -6,8 +6,14 @@ from penampakan.errors import EvidenceValidationError
 from penampakan.models import (
     AnswerAction,
     AnswerStatus,
+    Box,
     CaptionPayload,
+    DetectionPayload,
     EvidenceRef,
+    MarkDescriptionPayload,
+    MarkDescriptionRef,
+    MarkPayload,
+    MarkRef,
     TextPayload,
     WarningInfo,
     WarningPayload,
@@ -123,6 +129,51 @@ def test_duplicate_evidence_references_collapse_in_first_seen_order() -> None:
 
     assert tuple(item.observation.id for item in evidence) == (second.id, first.id)
     assert evidence[0].supports == "Amount"
+
+
+def test_mark_description_requires_the_original_localized_source_citation() -> None:
+    region = Box(x_min=0.1, y_min=0.1, x_max=0.4, y_max=0.5)
+    source = make_observation(1, DetectionPayload(label="car"), region=region)
+    mapping = make_observation(
+        2,
+        MarkPayload(
+            derived_asset_id=_DERIVED,
+            parent_asset_id=_ROOT,
+            marks=(MarkRef(index=1, observation_id=source.id, region=region),),
+        ),
+        asset_id=_DERIVED,
+    )
+    description = make_observation(
+        3,
+        MarkDescriptionPayload(references=(MarkDescriptionRef(index=1, description="red car"),)),
+        asset_id=_DERIVED,
+    )
+    description = description.model_copy(
+        update={
+            "provenance": description.provenance.model_copy(
+                update={"parent_observation_ids": (mapping.id,)}
+            )
+        }
+    )
+    observations = (source, mapping, description)
+
+    with pytest.raises(EvidenceValidationError):
+        validate_evidence(
+            _answer(references=(_reference(description.id),)),
+            observations,
+            visible_observation_ids=tuple(item.id for item in observations),
+            root_asset_id=_ROOT,
+            asset_root_ids={_ROOT: _ROOT, _DERIVED: _ROOT},
+        )
+
+    evidence = validate_evidence(
+        _answer(references=(_reference(source.id), _reference(description.id))),
+        observations,
+        visible_observation_ids=tuple(item.id for item in observations),
+        root_asset_id=_ROOT,
+        asset_root_ids={_ROOT: _ROOT, _DERIVED: _ROOT},
+    )
+    assert tuple(item.observation.id for item in evidence) == (source.id, description.id)
 
 
 def test_support_claim_cannot_embed_action_json() -> None:

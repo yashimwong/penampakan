@@ -7,14 +7,23 @@ from collections.abc import Callable
 from typing import Annotated, Literal, TypeVar
 
 from PIL.Image import Image as PillowImage
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
+from penampakan.errors import ToolExecutionError
 from penampakan.image import transforms
 from penampakan.image.assets import PendingAsset
-from penampakan.models import Box
+from penampakan.models import Box, DetectionPayload, SegmentationPayload
 from penampakan.perception.registry import ToolExecutionContext, ToolRegistry, ToolResult
 
 AssetId = Annotated[str, StringConstraints(pattern=r"^img_[0-9a-f]{16,64}$")]
+ObservationId = Annotated[str, StringConstraints(pattern=r"^obs_[0-9]{6,}$")]
 ArgumentsT = TypeVar("ArgumentsT", bound=BaseModel)
 
 
@@ -74,6 +83,18 @@ class CoordinateGridArguments(_Arguments):
     rows: int = Field(default=4, ge=2, le=20)
     columns: int = Field(default=4, ge=2, le=20)
     labels: bool = True
+
+
+class MarkRegionsArguments(_Arguments):
+    """Observation-only arguments for deterministic Set-of-Mark rendering."""
+
+    asset_id: AssetId
+    source_observation_ids: tuple[ObservationId, ...] = Field(min_length=1, max_length=99)
+
+    @field_validator("source_observation_ids", mode="before")
+    @classmethod
+    def _json_array_to_tuple(cls, value: object) -> object:
+        return tuple(value) if isinstance(value, list) else value
 
 
 async def _crop(context: ToolExecutionContext, arguments: BaseModel) -> ToolResult:
@@ -150,6 +171,73 @@ async def _coordinate_grid(context: ToolExecutionContext, arguments: BaseModel) 
         ),
     )
     return ToolResult(assets=pending)
+
+
+async def _mark_regions(context: ToolExecutionContext, arguments: BaseModel) -> ToolResult:
+    values = _typed(arguments, MarkRegionsArguments)
+    context.ensure_asset_capacity(values.asset_id, 1)
+    resolved = []
+    for observation_id in dict.fromkeys(values.source_observation_ids):
+        try:
+            observation = context.observation(observation_id)
+        except Exception as error:
+            raise ToolExecutionError(
+                code="mark_source_unavailable",
+                tool_name="mark_regions",
+            ) from error
+        if observation.asset_id != values.asset_id:
+            raise ToolExecutionError(code="mark_source_cross_asset", tool_name="mark_regions")
+        if observation.region is None:
+            raise ToolExecutionError(code="mark_source_regionless", tool_name="mark_regions")
+        payload = observation.payload
+        if not isinstance(payload, (DetectionPayload, SegmentationPayload)):
+            raise ToolExecutionError(code="mark_source_invalid", tool_name="mark_regions")
+        resolved.append(
+            transforms._MarkCandidate(
+                observation_id=observation.id,
+                region=observation.region,
+                source_label=payload.label,
+                priority=observation.confidence or 0.0,
+            )
+        )
+    source = context.image(values.asset_id)
+    rendering = await _render_marks(source, tuple(resolved))
+    return ToolResult(
+        assets=(rendering.pending,),
+        warnings=rendering.warnings,
+        mark_mappings=(rendering.marks,),
+        source_observation_ids=tuple(dict.fromkeys(values.source_observation_ids)),
+    )
+
+
+async def _render_marks(
+    source: PillowImage,
+    candidates: tuple[transforms._MarkCandidate, ...],
+) -> transforms._MarkRenderResult:
+    task = asyncio.create_task(asyncio.to_thread(_render_marks_owned, source, candidates))
+    try:
+        return await asyncio.shield(task)
+    except asyncio.CancelledError:
+        task.add_done_callback(_close_late_mark_render)
+        raise
+
+
+def _render_marks_owned(
+    source: PillowImage,
+    candidates: tuple[transforms._MarkCandidate, ...],
+) -> transforms._MarkRenderResult:
+    try:
+        return transforms._mark_observation_regions(source, candidates)
+    finally:
+        source.close()
+
+
+def _close_late_mark_render(task: asyncio.Task[transforms._MarkRenderResult]) -> None:
+    try:
+        rendering = task.result()
+    except (asyncio.CancelledError, Exception):
+        return
+    rendering.pending.close()
 
 
 async def _render(
@@ -237,6 +325,21 @@ def register_transform_tools(registry: ToolRegistry) -> None:
     )
 
 
+def register_mark_tool(registry: ToolRegistry) -> None:
+    """Register the observation-only transform after capability-contract gating."""
+
+    registry.register(
+        name="mark_regions",
+        description=(
+            "Create numeric references for visible detection or segmentation observations."
+        ),
+        arguments_model=MarkRegionsArguments,
+        executor=_mark_regions,
+        creates_assets=True,
+        cost_hint=2,
+    )
+
+
 def _typed(value: BaseModel, expected: type[ArgumentsT]) -> ArgumentsT:
     if not isinstance(value, expected):
         raise TypeError("validated tool arguments have an unexpected type")
@@ -248,7 +351,9 @@ __all__ = [
     "CoordinateGridArguments",
     "CropArguments",
     "GrayscaleArguments",
+    "MarkRegionsArguments",
     "RotateArguments",
     "TileArguments",
+    "register_mark_tool",
     "register_transform_tools",
 ]

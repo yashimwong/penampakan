@@ -12,7 +12,12 @@ from penampakan.models import (
     DetectionRequest,
     ImageAsset,
     InspectionPlan,
+    MarkPayload,
+    MarkRef,
+    Observation,
+    ObservationDraft,
     Point,
+    Provenance,
     TraceSummary,
     TransformDescriptor,
 )
@@ -144,3 +149,112 @@ def test_trace_summary_requires_utc_time() -> None:
     values["started_at"] = datetime(2026, 2, 10)
     with pytest.raises(ValidationError):
         TraceSummary(**values)
+
+
+def mark_ref(index: int = 1, observation_id: str = "obs_000001") -> MarkRef:
+    return MarkRef(
+        index=index,
+        observation_id=observation_id,
+        region=Box(x_min=0.1, y_min=0.2, x_max=0.3, y_max=0.4),
+        source_label=" car ",
+    )
+
+
+def mark_payload(*marks: MarkRef) -> MarkPayload:
+    return MarkPayload(
+        derived_asset_id="img_fedcba9876543210",
+        parent_asset_id="img_0123456789abcdef",
+        marks=marks or (mark_ref(),),
+    )
+
+
+def test_mark_ref_enforces_index_id_region_and_label_contracts() -> None:
+    ref = mark_ref()
+
+    assert ref.index == 1
+    assert ref.observation_id == "obs_000001"
+    assert ref.source_label == "car"
+
+    for index in (0, 100):
+        with pytest.raises(ValidationError):
+            mark_ref(index=index)
+    with pytest.raises(ValidationError):
+        MarkRef(
+            index=1,
+            observation_id="not-an-observation",
+            region=ref.region,
+        )
+    with pytest.raises(ValidationError):
+        MarkRef(
+            index=1,
+            observation_id="obs_000001",
+            region={"x_min": 0.4, "y_min": 0.2, "x_max": 0.3, "y_max": 0.5},
+        )
+    with pytest.raises(ValidationError):
+        MarkRef(
+            index=1,
+            observation_id="obs_000001",
+            region=ref.region,
+            source_label="unsafe\x00label",
+        )
+
+
+@pytest.mark.parametrize(
+    "marks",
+    [
+        (),
+        (mark_ref(), mark_ref(index=1, observation_id="obs_000002")),
+        (mark_ref(), mark_ref(index=2)),
+        (mark_ref(), mark_ref(index=3, observation_id="obs_000002")),
+        (mark_ref(index=2), mark_ref(index=1, observation_id="obs_000002")),
+    ],
+)
+def test_mark_payload_requires_unique_contiguous_indices_and_observation_ids(
+    marks: tuple[MarkRef, ...],
+) -> None:
+    values = {
+        "derived_asset_id": "img_fedcba9876543210",
+        "parent_asset_id": "img_0123456789abcdef",
+        "marks": marks,
+    }
+
+    with pytest.raises(ValidationError):
+        MarkPayload(**values)
+
+
+def test_mark_payload_has_no_region_and_decodes_as_observation_payload() -> None:
+    payload = mark_payload()
+    draft = ObservationDraft.model_validate({"payload": payload.model_dump()})
+
+    assert draft.payload == payload
+    assert draft.region is None
+    with pytest.raises(ValidationError):
+        MarkPayload.model_validate({**payload.model_dump(), "region": mark_ref().region})
+
+
+def test_mark_observations_span_the_asset_while_refs_carry_regions() -> None:
+    payload = mark_payload()
+    provenance = Provenance(
+        tool="mark_regions",
+        capability=None,
+        backend_name="penampakan.core",
+        backend_version="1.0",
+        request_hash="a" * 64,
+        parent_observation_ids=("obs_000001",),
+        duration_ms=1,
+    )
+    observation_values = {
+        "id": "obs_000002",
+        "asset_id": payload.derived_asset_id,
+        "payload": payload,
+        "provenance": provenance,
+    }
+
+    observation = Observation(**observation_values)
+
+    assert observation.region is None
+    assert observation.payload.marks[0].region == mark_ref().region
+    with pytest.raises(ValidationError, match="cannot have a region"):
+        Observation(**observation_values, region=mark_ref().region)
+    with pytest.raises(ValidationError, match="cannot have a region"):
+        ObservationDraft(payload=payload, region=mark_ref().region)

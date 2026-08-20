@@ -13,6 +13,7 @@ from penampakan.errors import (
 )
 from penampakan.models import (
     Capability,
+    MarkPayload,
     Observation,
     ObservationDraft,
     Provenance,
@@ -236,12 +237,19 @@ class ObservationStore:
 
     def _validate_payload_assets(self, asset_id: str, draft: ObservationDraft) -> None:
         payload = draft.payload
-        if not isinstance(payload, TransformPayload):
+        if not isinstance(payload, (TransformPayload, MarkPayload)):
             return
         self._require_asset(payload.parent_asset_id)
         self._require_asset(payload.derived_asset_id)
         if payload.derived_asset_id != asset_id:
-            raise ValueError("transform observation must target its derived asset")
+            raise ValueError("transform and mark observations must target their derived asset")
+        if isinstance(payload, MarkPayload):
+            source_ids = tuple(mark.observation_id for mark in payload.marks)
+            self._validate_references(source_ids)
+            for mark in payload.marks:
+                source = self._by_id[mark.observation_id]
+                if source.asset_id != payload.parent_asset_id or source.region != mark.region:
+                    raise ValueError("mark references must match their source observations")
 
     @staticmethod
     def _build_observation(

@@ -47,6 +47,23 @@ provenance/usage diagnostics; it is not a faithfulness or entailment score.
 must not be described as entailed unless an independently evaluated entailment
 scorer or human protocol established that result.
 
+Set-of-Mark rendering tests establish deterministic geometry, numbering,
+deduplication, crowding behavior, alpha preservation, label sanitization, and
+canonical PNG output. They do not establish that a visual model can read the
+marks or that answer quality improves. Advertising a mark-reference backend
+feature requires real weights, pinned revisions, licensed natural fixtures, and
+structured scoring of missing, spurious, and correctly attributed mark indices;
+ordinary caption text containing a numeral is insufficient. No first-party
+backend has passed that gate yet.
+
+The broader Set-of-Mark answer-quality gate also remains open. It requires a
+preregistered paired comparison against a no-mark control using the same frozen
+source detections, mark-aware backend revision, and resource budget, covering
+varied natural and synthetic multi-instance tasks plus accuracy, wrong-answer,
+grounding, latency, token, backend-call, derived-asset, and occlusion outcomes.
+Until that artifact and its ADR exist, no default prompt or tool change—and no
+claim of Set-of-Mark accuracy improvement—is warranted.
+
 ## Release gate
 
 Before publishing a release:
@@ -66,4 +83,3 @@ Before publishing a release:
 
 The version tag must match the package version. Release artifacts are published
 only after the verification job succeeds.
-

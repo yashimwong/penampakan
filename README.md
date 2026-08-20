@@ -230,6 +230,54 @@ Pillow images. Remote URLs are rejected by default. Images are orientation
 corrected, bounded by configurable limits, and normalized to canonical RGB or
 RGBA assets before a backend sees them.
 
+### Set-of-Mark rendering
+
+`penampakan.image.mark_regions` is a base-install, programmatic transform for
+drawing deterministic numbered boxes on a Pillow image. It accepts one to 99
+normalized `Box` values and returns a pending `set_of_mark` derived asset. The
+descriptor records `source="caller_supplied"`: drawing a caller's boxes changes
+pixels, but does not create an observation or turn those coordinates, their
+optional labels, or the rendered digits into evidence.
+
+```python
+from PIL import Image
+
+from penampakan import Box
+from penampakan.image import mark_regions
+
+with Image.open("shelf.png") as image:
+    marked = mark_regions(
+        image,
+        (
+            Box(x_min=0.10, y_min=0.20, x_max=0.30, y_max=0.70),
+            Box(x_min=0.55, y_min=0.18, x_max=0.80, y_max=0.72),
+        ),
+    )
+    try:
+        marked.image.save("shelf-marked.png")
+    finally:
+        marked.close()
+```
+
+Labels are omitted by default to limit occlusion and avoid rendering untrusted
+text. Passing matching `labels=...` values has no visible effect unless
+`include_labels=True`; enabled labels are control-character sanitized,
+whitespace-normalized, and truncated. Badge numbers use vector glyphs implemented
+in Penampakan's source under its MIT license, so rendering does not depend on an
+installed font or on a separately licensed font asset.
+
+The Set-of-Mark result reported in the original research comes from supplying the
+marked pixels directly to a mark-capable multimodal model. Sending the same image
+through a generic captioner is not assumed to reproduce that mechanism or to read
+the digits. Penampakan currently ships no first-party visual backend with a
+validated mark-reference feature, so `mark_regions` is not exposed as an agent
+tool and neither `agent-v1` nor the default prompt changes. Agent registration is
+reserved for a backend revision that advertises and passes the structured
+mark-reference contract and for sessions that also have localized detection or
+segmentation observations. When that gate is met, `agent-v2` adds mark-specific
+guidance and the workflow exposes observation-only `mark_regions` followed by
+structured `describe_marks`; `agent-v1` stays byte-for-byte unchanged.
+
 Penampakan currently supports one root image per session; ordered multi-image
 questions and aggregate image limits have not shipped. Trace redaction and cache
 retention are independent: trace content is excluded by default and

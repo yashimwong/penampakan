@@ -135,6 +135,12 @@ def test_descriptor_derived_support_rejects_unsupported_options() -> None:
     assert backend.supports(CaptionRequest())
     assert not backend.supports(CaptionRequest(focus="display"))
     assert focused.supports(CaptionRequest(focus="display"))
+    assert not backend.supports(CaptionRequest(mark_indices=(1,)))
+    mark_aware = CallableVisionBackend(
+        descriptor("caption.mark_references"),
+        lambda image, request: result(),
+    )
+    assert mark_aware.supports(CaptionRequest(mark_indices=(1,)))
     assert not backend.supports(MetadataRequest())
     assert not backend.supports(ColorsRequest())
     assert not backend.supports(DetectionRequest(labels=("car",)))

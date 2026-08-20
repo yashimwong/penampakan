@@ -10,6 +10,8 @@ from penampakan.models import (
     ColorsRequest,
     DetectionPayload,
     DetectionRequest,
+    MarkDescriptionPayload,
+    MarkDescriptionRef,
     MetadataPayload,
     MetadataRequest,
     ObservationDraft,
@@ -88,6 +90,36 @@ def test_request_capability_mismatch_invalidates_complete_call() -> None:
 
     with pytest.raises(InvalidBackendOutputError):
         normalize_backend_result(result, OCRRequest())
+
+
+def test_mark_reference_request_requires_structured_requested_indices() -> None:
+    request = CaptionRequest(mark_indices=(1, 2))
+    structured = ObservationDraft(
+        payload=MarkDescriptionPayload(
+            references=(
+                MarkDescriptionRef(index=1, description="left red car"),
+                MarkDescriptionRef(index=2, description="right blue car"),
+            )
+        )
+    )
+
+    assert normalize_backend_result(result_with(structured), request).observations == (structured,)
+    with pytest.raises(InvalidBackendOutputError):
+        normalize_backend_result(
+            result_with(ObservationDraft(payload=CaptionPayload(text="Mark 1 is red."))),
+            request,
+        )
+    with pytest.raises(InvalidBackendOutputError):
+        normalize_backend_result(
+            result_with(
+                ObservationDraft(
+                    payload=MarkDescriptionPayload(
+                        references=(MarkDescriptionRef(index=3, description="spurious"),)
+                    )
+                )
+            ),
+            request,
+        )
 
 
 @pytest.mark.parametrize(
