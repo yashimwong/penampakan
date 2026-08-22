@@ -125,6 +125,59 @@ def test_mark_tools_require_localization_and_an_exact_pinned_backend_feature(
     assert ("describe_marks" in tool_names) is expected
 
 
+def test_mark_tools_absent_when_the_mark_backend_has_no_pinned_identity() -> None:
+    # A backend that advertises the feature but carries no model identity at all
+    # is not an "exact backend revision", so the mark tools stay unregistered.
+    descriptor = BackendDescriptor(
+        name="tests.unidentified_mark",
+        version="1.0",
+        model_id=None,
+        model_revision=None,
+        capabilities=(
+            _capability(Capability.DETECT),
+            _capability(Capability.CAPTION, "caption.mark_references"),
+        ),
+    )
+    router = cast(BackendRouter, SimpleNamespace(descriptors=(descriptor,)))
+
+    tool_names = {spec.name for spec in AsyncPenampakan._build_tools(router).specs}
+
+    assert "mark_regions" not in tool_names
+    assert "describe_marks" not in tool_names
+
+
+def test_mark_index_caption_routes_only_to_the_pinned_mark_backend() -> None:
+    def _analyze(image: BackendImage, request: VisionRequest) -> VisionResult:
+        return VisionResult(observations=())
+
+    pinned = CallableVisionBackend(
+        _descriptor(
+            "tests.pinned_mark",
+            (_capability(Capability.CAPTION, "caption.mark_references"),),
+        ),
+        _analyze,
+    )
+    unpinned = CallableVisionBackend(
+        _descriptor(
+            "tests.unpinned_mark",
+            (_capability(Capability.CAPTION, "caption.mark_references"),),
+            pinned=False,
+        ),
+        _analyze,
+    )
+    router = BackendRouter((pinned, unpinned))
+
+    mark_targets = tuple(
+        descriptor.name for descriptor in router.route(CaptionRequest(mark_indices=(1,)))
+    )
+    plain_targets = {descriptor.name for descriptor in router.route(CaptionRequest())}
+
+    # A mark description only dispatches to the pinned, proven revision, while a
+    # plain caption still reaches both caption backends.
+    assert mark_targets == ("tests.pinned_mark",)
+    assert plain_targets == {"tests.pinned_mark", "tests.unpinned_mark"}
+
+
 def test_mark_regions_policy_schema_accepts_only_asset_and_observation_ids() -> None:
     schema = MarkRegionsArguments.model_json_schema()
 

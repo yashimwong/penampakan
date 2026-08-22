@@ -6,8 +6,11 @@ from pydantic import ValidationError
 
 from penampakan.models import (
     JSON_VALUE_ADAPTER,
+    BackendDescriptor,
     BackendImage,
     Box,
+    Capability,
+    CapabilityDescriptor,
     CaptionRequest,
     DetectionRequest,
     ImageAsset,
@@ -258,3 +261,41 @@ def test_mark_observations_span_the_asset_while_refs_carry_regions() -> None:
         Observation(**observation_values, region=mark_ref().region)
     with pytest.raises(ValidationError, match="cannot have a region"):
         ObservationDraft(payload=payload, region=mark_ref().region)
+
+
+def _mark_capable_descriptor(
+    *, model_id: str | None, model_revision: str | None, feature: bool = True
+) -> BackendDescriptor:
+    features = ("caption.mark_references",) if feature else ()
+    return BackendDescriptor(
+        name="tests.backend",
+        version="1.0",
+        model_id=model_id,
+        model_revision=model_revision,
+        capabilities=(
+            CapabilityDescriptor(capability=Capability.CAPTION, features=frozenset(features)),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("model_id", "model_revision", "feature", "expected"),
+    [
+        ("tests/model", "a" * 40, True, True),
+        ("tests/model", None, True, False),
+        (None, None, True, False),
+        ("tests/model", "a" * 40, False, False),
+    ],
+    ids=("pinned-feature", "unpinned", "unidentified", "pinned-no-feature"),
+)
+def test_advertises_proven_mark_references_requires_pinned_revision_and_feature(
+    model_id: str | None,
+    model_revision: str | None,
+    feature: bool,
+    expected: bool,
+) -> None:
+    descriptor = _mark_capable_descriptor(
+        model_id=model_id, model_revision=model_revision, feature=feature
+    )
+
+    assert descriptor.advertises_proven_mark_references is expected

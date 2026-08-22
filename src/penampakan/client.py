@@ -574,13 +574,7 @@ class AsyncPenampakan:
         register_transform_tools(registry)
         has_region_source = bool({Capability.DETECT, Capability.SEGMENT}.intersection(capabilities))
         has_proven_mark_backend = any(
-            descriptor.durable_cache_eligible
-            and any(
-                capability.capability is Capability.CAPTION
-                and "caption.mark_references" in capability.features
-                for capability in descriptor.capabilities
-            )
-            for descriptor in router.descriptors
+            descriptor.advertises_proven_mark_references for descriptor in router.descriptors
         )
         if has_region_source and has_proven_mark_backend:
             register_mark_tool(registry)

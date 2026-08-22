@@ -132,10 +132,13 @@ own. It is a machine-readable transform mapping, not perception evidence, and
 core evidence validation rejects it just as it rejects a `TransformPayload`.
 
 `CaptionRequest.mark_indices` selects up to 99 unique rendered indices for a
-backend whose caption capability advertises `caption.mark_references`. Such a
-request must return one structured `MarkDescriptionPayload`, containing unique
-`MarkDescriptionRef(index, description)` values, rather than an ordinary caption
-or free text that merely mentions a number. Mark descriptions are untrusted
+backend whose caption capability advertises `caption.mark_references`. Both tool
+registration and request routing require that exact backend revision to be
+pinned, so a backend that declares the feature without a pinned model revision is
+never the target of a mark description. Such a request must return one structured
+`MarkDescriptionPayload`, containing unique `MarkDescriptionRef(index, description)`
+values, rather than an ordinary caption or free text that merely mentions a
+number. Mark descriptions are untrusted
 backend observations; unlike the transform-only `MarkPayload`, they can be cited
 alongside the original localized observations when they actually support a
 claim.

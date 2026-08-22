@@ -294,6 +294,25 @@ class BackendDescriptor(_FrozenModel):
         """Return whether this identity is exact enough for durable cross-process caching."""
         return self.model_id is None or self.model_revision is not None
 
+    @property
+    def advertises_proven_mark_references(self) -> bool:
+        """Return whether this backend proves a pinned mark-reference contract.
+
+        Set-of-Mark descriptions may only run against an exact, pinned backend
+        revision (spec 09 D3/D4): the registration and routing gates both cite
+        "that exact backend revision", so a backend without a concrete pinned
+        model revision cannot be the proof. A self-declared ``caption.mark_references``
+        feature on an unidentified or unpinned backend therefore does not count,
+        even though such an identity is otherwise ``durable_cache_eligible``.
+        """
+        if self.model_id is None or self.model_revision is None:
+            return False
+        return any(
+            capability.capability is Capability.CAPTION
+            and "caption.mark_references" in capability.features
+            for capability in self.capabilities
+        )
+
     @field_validator("capabilities")
     @classmethod
     def _unique_capabilities(

@@ -472,17 +472,17 @@ class BackendRouter:
 
     @staticmethod
     def _supports(entry: _BackendEntry, request: VisionRequest) -> bool:
-        if isinstance(request, CaptionRequest) and request.mark_indices:
-            caption = next(
-                (
-                    item
-                    for item in entry.descriptor.capabilities
-                    if item.capability is Capability.CAPTION
-                ),
-                None,
-            )
-            if caption is None or "caption.mark_references" not in caption.features:
-                return False
+        # Mark descriptions must run on the exact pinned revision that justified
+        # registration (spec 09 D3/D4). Requiring the proven, pinned mark-reference
+        # contract here — not merely the advertised feature — stops a mark request
+        # from routing to a second caption backend that declares the feature on an
+        # unpinned revision.
+        if (
+            isinstance(request, CaptionRequest)
+            and request.mark_indices
+            and not entry.descriptor.advertises_proven_mark_references
+        ):
+            return False
         try:
             supported = entry.backend.supports(request)
         except Exception as error:
