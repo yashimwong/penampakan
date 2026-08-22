@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "penampakan"
-version = "0.6.0"
+version = "0.6.1"
 description = "Safe visual tool orchestration for text-only language models"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"

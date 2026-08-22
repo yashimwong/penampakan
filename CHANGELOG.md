@@ -1,5 +1,20 @@
 # Changelog
 
+## Penampakan 0.6.1
+Released 2026-08-22
+
+- Corrected the release contents: the `0.6.0` package was tagged before the
+  documented Set-of-Mark implementation commit. This release includes the
+  public mark contracts, deterministic mark rendering, and gated agent workflow
+  described in the `0.6.0` notes below.
+- Mark-aware tool registration and request routing now require a concrete model
+  identity and pinned model revision in addition to the advertised
+  `caption.mark_references` feature, so an unpinned backend cannot be selected
+  for structured mark descriptions.
+- Expanded deterministic mark-rendering coverage across dark, light, textured,
+  edge, corner, tiny, overlapping, crowded, and 99-region inputs, including
+  environments without an available font.
+
 ## Penampakan 0.6.0
 Released 2026-08-20
 

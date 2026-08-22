@@ -9,7 +9,7 @@ def test_import_is_lightweight() -> None:
 
     module = importlib.import_module("penampakan")
 
-    assert module.__version__ == "0.6.0"
+    assert module.__version__ == "0.6.1"
     assert optional_modules.isdisjoint(sys.modules)
 
 
